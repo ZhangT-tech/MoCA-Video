@@ -113,7 +113,7 @@ def run_inference(args, gpu_num, gpu_no, **kwargs):
             cond_images = load_image_batch(cond_inputs_rank[idx_s:idx_e], (args.height, args.width))
             cond_images = cond_images.to(model.device)
             img_emb = model.get_image_embeds(cond_images)
-            imtext_cond = torch.cat([text_emb, img_emb], dim=1)
+            imtext_cond = torch.cat([text_emb, img_emb], dim=1) # Get both the text and image embedding
             cond = {"c_crossattn": [imtext_cond], "fps": fps}
         else:
             raise NotImplementedError

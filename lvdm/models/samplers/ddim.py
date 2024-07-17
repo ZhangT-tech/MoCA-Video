@@ -6,20 +6,33 @@ from lvdm.common import noise_like
 
 
 class DDIMSampler(object):
+    """
+    Perform DDIM sampling using a diffusion model.
+    """
     def __init__(self, model, schedule="linear", **kwargs):
         super().__init__()
-        self.model = model
+        self.model = model # DDIM model
         self.ddpm_num_timesteps = model.num_timesteps
-        self.schedule = schedule
+        self.schedule = schedule 
         self.counter = 0
 
     def register_buffer(self, name, attr):
+        """
+        Register a buffer (tensor) to the class, ensuring its on the CUDA device if necessary.
+        """
         if type(attr) == torch.Tensor:
             if attr.device != torch.device("cuda"):
                 attr = attr.to(torch.device("cuda"))
         setattr(self, name, attr)
 
     def make_schedule(self, ddim_num_steps, ddim_discretize="uniform", ddim_eta=0., verbose=True):
+        """
+        Create the DDIM sampling schedule.
+        ddim_num_steps: int, number of DDIM steps
+        ddim_discretize: str, method to discretize the diffusion steps
+        ddim_eta: float, noise scale factor
+        verbose: bool, whether to print progress
+        """
         self.ddim_timesteps = make_ddim_timesteps(ddim_discr_method=ddim_discretize, num_ddim_timesteps=ddim_num_steps,
                                                   num_ddpm_timesteps=self.ddpm_num_timesteps,verbose=verbose)
         alphas_cumprod = self.model.alphas_cumprod
@@ -60,10 +73,10 @@ class DDIMSampler(object):
 
     @torch.no_grad()
     def sample(self,
-               S,
-               batch_size,
-               shape,
-               conditioning=None,
+               S, # number of steps
+               batch_size, # batch size
+               shape, # shape of the data
+               conditioning=None, # conditioning information for guided sampling
                callback=None,
                normals_sequence=None,
                img_callback=None,
@@ -100,6 +113,7 @@ class DDIMSampler(object):
                 if conditioning.shape[0] != batch_size:
                     print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
 
+        ## schedule creation
         self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=schedule_verbose)
         
         # make shape
@@ -108,9 +122,10 @@ class DDIMSampler(object):
             size = (batch_size, C, H, W)
         elif len(shape) == 4:
             C, T, H, W = shape
-            size = (batch_size, C, T, H, W)
+            size = (batch_size, C, T, H, W) # frames added
         # print(f'Data shape for DDIM sampling is {size}, eta {eta}')
         
+        # Perform the actual sampling
         samples, intermediates = self.ddim_sampling(conditioning, size,
                                                     callback=callback,
                                                     img_callback=img_callback,
@@ -139,20 +154,38 @@ class DDIMSampler(object):
                       unconditional_guidance_scale=1., unconditional_conditioning=None, verbose=True,
                       cond_tau=1., target_size=None, start_timesteps=None, latents_dir=None,
                       **kwargs):
+        """
+        cond: dict, conditioning information
+        shape: tuple, shape of the generated data
+        x_T: tensor, initial latent state
+        ddim_use_original_steps: bool, whether to use the original DDPM steps
+        other arguments: see sample method
+        """
         device = self.model.betas.device        
-        b = shape[0]
+        b = shape[0] # batch size
         if x_T is None:
-            img = torch.randn(shape, device=device) # [1,4,16,40,64]
+            img = torch.randn(shape, device=device) # [1,4,16,40,64] -> [bath_size, C, T, H, W]
         else:
             img = x_T
         
         if timesteps is None: # True
             timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
-        elif timesteps is not None and not ddim_use_original_steps:
+        elif timesteps is not None and not ddim_use_original_steps: # enable customized sampling schedules
+            # compare the ratio of the provided timesteps to the original timesteps, and ensure it not exceeds 1
+            # which prevents selecting more timesteps than available
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
             
+        # Store the intermediate results during sampling
+        # x_inter: it stores the intermediate states of the latent variable x at each timestep during the reverse diffusion process
+        # pred_x0: it stores the model's prediction of the original data at each timestep, which is an estimate of the clean data corresponding to the latent variable x
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
+
+        # reversed(range(0, timesteps)): 9, 8, 7, ..., 0
+        # np.flip is used when timesteps is an array specifying the exact timesteps to sample
+        # if timesteps  = np.array([0, 2, 4, 6, 8, 10]), the reversed order using np.flip is 10, 8, 6, 4, 2, 0
+        # when timesteps is an array, which means the model will perform denoising only at steps 0, 2, 4, 6, 8, 10
+        # there are the points in the reverse diffusion process where the model will generate intermediate states leading to the final sample
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         if verbose:
@@ -175,8 +208,10 @@ class DDIMSampler(object):
                                       unconditional_conditioning=unconditional_conditioning,
                                       x0=x0,
                                       **kwargs)
-            
-            img, pred_x0 = outs
+            # the img is the intermediate state of the latent variable x at each timestep
+            # pred_x0 is the model's prediction of the original data at each timestep
+            img, pred_x0 = outs 
+            # The update for the intermediates?
         if latents_dir is not None:
             torch.save(img, f"{latents_dir}/{total_steps}.pt")
 
@@ -186,6 +221,7 @@ class DDIMSampler(object):
     def fifo_onestep(self, cond, shape, latents=None, timesteps=None, indices=None,
                      unconditional_guidance_scale=1., unconditional_conditioning=None,
                      **kwargs):
+        #How does it apply diagonal denoising?# 
         device = self.model.betas.device        
         b, _, f, _, _ = shape
 
@@ -204,8 +240,15 @@ class DDIMSampler(object):
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       uc_type=None, conditional_guidance_scale_temporal=None, **kwargs):
+        """
+        It is used for performing a single DDIM sampling step.
+        x: current state of the latent variable x
+        c: conditioning information
+        t: timestep
+        index: index of the timestep
+        """
         b, *_, device = *x.shape, x.device
-        if x.dim() == 5:
+        if x.dim() == 5: #[batch_size, C, T, H, W]
             is_video = True
         else:
             is_video = False

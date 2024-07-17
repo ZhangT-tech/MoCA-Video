@@ -9,38 +9,112 @@ import imageio
 from tqdm import trange
 sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 from lvdm.models.samplers.ddim import DDIMSampler
+import torch.fft as fft
+import math
 
+global_counter = 0
 
 def prepare_latents(args, latents_dir, sampler):
     latents_list = []
 
+    ## Load a tensor of video frames from the latents_dir
     video = torch.load(latents_dir+f"/{args.num_inference_steps}.pt")
     if args.lookahead_denoising:
-        for i in range(args.video_length // 2):
+        """
+        To have enough initiail noisy frames to start the lookahead denoising
+        Generate dummy noisy frames for the first half of the video
+        """
+
+        for i in range(args.video_length // 2): # 4/2 = 2 
             alpha = sampler.ddim_alphas[0]
             beta = 1 - alpha
             latents = alpha**(0.5) * video[:,:,[0]] + beta**(0.5) * torch.randn_like(video[:,:,[0]])
-            latents_list.append(latents)
+            latents_list.append(latents) # [z1, z1]
 
-    for i in range(args.num_inference_steps):
+    # This is to prepare the latents for denoising
+    for i in range(args.num_inference_steps): # n * f = 8
         alpha = sampler.ddim_alphas[i] # image -> noise
         beta = 1 - alpha
-        frame_idx = max(0, i-(args.num_inference_steps - args.video_length))
+        frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) # 0, 0, 0, 0, 0, 1, 2, 3
         latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
-        latents_list.append(latents)
+        latents_list.append(latents) # [z1, z1, z1, z1, z1, z2, z3, z4]
 
     latents = torch.cat(latents_list, dim=2)
 
-    return latents
+    return latents # [z1, z1, z1, z1, z1, z1, z1, z2, z3, z4] = 10 frames
+
+def gaussian_low_pass_filter(shape, d_s=0.25, d_t=0.25):
+    # """
+    # Compute the gaussian low pass filter mask.
+
+    # Args:
+    #     shape: shape of the filter (volume)
+    #     d_s: normalized stop frequency for spatial dimensions (0.0-1.0)
+    #     d_t: normalized stop frequency for temporal dimension (0.0-1.0)
+    # """
+    T, H, W = shape[-3], shape[-2], shape[-1]
+    mask = torch.zeros(shape)
+    if d_s==0 or d_t==0:
+        return mask
+    for t in range(T):
+        for h in range(H):
+            for w in range(W):
+                d_square = (((d_s/d_t)*(2*t/T-1))**2 + (2*h/H-1)**2 + (2*w/W-1)**2)
+                mask[..., t,h,w] = math.exp(-1/(2*d_s**2) * d_square)
+    return mask
+
 
 
 def shift_latents(latents):
-    # shift latents
-    latents[:,:,:-1] = latents[:,:,1:].clone()
+    global global_counter 
+    # # shift latents
+    # latents[:,:,:-1] = latents[:,:,1:].clone()
 
-    # add new noise to the last frame
-    latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    # # add new noise to the last frame
+    # latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
 
+    # try with FreeInit 
+    ### Get the latest clean frame and add noise to it
+    device = latents.device
+
+    if (global_counter+1)//4 == 0:
+        latest_clean_frame = latents[:,:,0].clone()
+        print(f"The shape of the latest clean frame is: {latest_clean_frame.shape}")
+
+        ### Shift the latents
+        latents[:,:,:-1] = latents[:,:,1:].clone()
+
+        ### Add 3D_FFT to both the latest clean frame and the Guassian noise
+        x_freq = fft.fftn(latest_clean_frame, dim=(-2, -1))
+        x_freq = fft.fftshift(x_freq, dim=(-2, -1))
+        noise_freq = fft.fftn(torch.randn_like(latest_clean_frame), dim=(-2, -1))
+        noise_freq = fft.fftshift(noise_freq, dim=(-2, -1))
+
+        # frequency mix 
+        LPF = gaussian_low_pass_filter(x_freq.shape, d_s=0.25, d_t=0.25)
+        LPF = LPF.to(device)
+        HPF = 1 - LPF
+        x_freq_low = x_freq * LPF
+        noise_freq_high = noise_freq * HPF
+        x_freq_mixed = x_freq_low + noise_freq_high
+
+        # IFFT
+        x_freq_mixed = fft.ifftshift(x_freq_mixed, dim=(-2, -1))
+        x_mixed = fft.ifftn(x_freq_mixed, dim=(-2, -1))
+
+        ## Add the mixed noise to the last frame of all the latents
+        x_mixed_real = x_mixed.real
+
+        latents[:,:,-1] = x_mixed_real
+    else:
+        # shift latents
+        latents[:,:,:-1] = latents[:,:,1:].clone()
+
+        # add new noise to the last frame
+        latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    
+    global_counter += 1
+    
     return latents
 
 
@@ -104,11 +178,11 @@ def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, dd
 def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
                         cfg_scale=1.0, temporal_cfg_scale=None, latents_dir=None, **kwargs):
     ddim_sampler = DDIMSampler(model)
-    uncond_type = model.uncond_type
+    uncond_type = model.uncond_type # used to improve the quality and diversity of generated samples with additional conditioning that is not directly rely on the input data
     batch_size = noise_shape[0]
     ## construct unconditional guidance
     if cfg_scale != 1.0:
-        if uncond_type == "empty_seq": # True
+        if uncond_type == "empty_seq": # True, a neutral sample.
             prompts = batch_size * [""]
             #prompts = N * T * [""]  ## if is_imgbatch=True
             uc_emb = model.get_learned_conditioning(prompts)
@@ -117,15 +191,19 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
             uc_emb = torch.zeros_like(c_emb)
                 
         ## process image embedding token
-        if hasattr(model, 'embedder'): # False
+        ## ===================== can add additional image embedding token =================================
+        if hasattr(model, 'embedder'): # False 
             uc_img = torch.zeros(noise_shape[0],3,224,224).to(model.device)
             ## img: b c h w >> b l c
             uc_img = model.get_image_embeds(uc_img)
             uc_emb = torch.cat([uc_emb, uc_img], dim=1)
         
         if isinstance(cond, dict): # True
-            uc = {key:cond[key] for key in cond.keys()}
-            uc.update({'c_crossattn': [uc_emb]})
+            uc = {key:cond[key] for key in cond.keys()} # preserve the original condition keys-value pairs
+            ## ===================== Check if it's working (Original not included) =================================
+            ## Maybe somewhere else, they add them together cause this is simply the unconditional guidance
+            # uc_emd = torch.cat([uc_emb, uc['c_crossattn'][0]], dim=1) # concatenate the cross attention key-value pairs
+            uc.update({'c_crossattn': [uc_emb]}) # update the cross attention key-value pairs, overwrite or concatenate?
         else: # False
             uc = uc_emb
     else:
@@ -136,12 +214,12 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
     if ddim_sampler is not None:
         kwargs.update({"clean_cond": True})
         samples, _ = ddim_sampler.sample(S=ddim_steps,
-                                        conditioning=cond,
-                                        batch_size=noise_shape[0],
+                                        conditioning=cond, # the preserved conditional embeddings
+                                        batch_size=noise_shape[0], # [batch_size, channels, frames, height, width] 
                                         shape=noise_shape[1:],
                                         verbose=True,
                                         unconditional_guidance_scale=cfg_scale,
-                                        unconditional_conditioning=uc,
+                                        unconditional_conditioning=uc, # obtained last step
                                         eta=ddim_eta,
                                         temporal_length=noise_shape[2],
                                         conditional_guidance_scale_temporal=temporal_cfg_scale,
@@ -188,31 +266,32 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
     else:
         uc = None
     
-    latents = prepare_latents(args, latents_dir, ddim_sampler)
+    # Latents preparation
+    latents = prepare_latents(args, latents_dir, ddim_sampler) # [z1, z1, z1, z1, z1, z1, z1, z2, z3, z4]
 
-    num_frames_per_gpu = args.video_length
+    num_frames_per_gpu = args.video_length # 4
     if args.save_frames:
         fifo_dir = os.path.join(output_dir, "fifo")
         os.makedirs(fifo_dir, exist_ok=True)
 
     fifo_video_frames = []
 
-    timesteps = ddim_sampler.ddim_timesteps
-    indices = np.arange(args.num_inference_steps)
+    timesteps = ddim_sampler.ddim_timesteps # [1, 2, 3, 4, 5, 6, 7, 8]
+    indices = np.arange(args.num_inference_steps) # [0, 1, 2, 3, 4, 5, 6, 7]
 
     if args.lookahead_denoising:
-        timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps])
-        indices = np.concatenate([np.full((args.video_length//2,), 0), indices])
-    for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"):
-        for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
-            start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
-            midpoint_idx = start_idx + num_frames_per_gpu // 2
-            end_idx = start_idx + num_frames_per_gpu
+        timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps]) # [1, 1, 1, 2, 3, 4, 5, 6, 7, 8]
+        indices = np.concatenate([np.full((args.video_length//2,), 0), indices]) # [0, 0, 0, 1, 2, 3, 4, 5, 6, 7]
+    for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"): # 10 + 8 -4 = 14
+        for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)): # 2 * 2 = 4 [3, 2, 1, 0]
+            start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu # 3 * 2 = 6; 2 * 2 = 4; 1 * 2 = 2; 0 * 2 = 0
+            midpoint_idx = start_idx + num_frames_per_gpu // 2 # 6 + 2 = 8; 4 + 2 = 6; 2 + 2 = 4; 0 + 2 = 2
+            end_idx = start_idx + num_frames_per_gpu # 6 + 4 = 10 ; 4 + 4 = 8; 2 + 4 = 6; 0 + 4 = 4
 
-            t = timesteps[start_idx:end_idx]
-            idx = indices[start_idx:end_idx]
+            t = timesteps[start_idx:end_idx] # [5, 6, 7, 8]; [3, 4, 5, 6]; [1, 2, 3, 4]; [1, 1, 1, 2]
+            idx = indices[start_idx:end_idx] # [4, 5, 6, 7]; [2, 3, 4, 5]; [0, 1, 2, 3]
 
-            input_latents = latents[:,:,start_idx:end_idx].clone()
+            input_latents = latents[:,:,start_idx:end_idx].clone() # [z1, z2, z3, z4] ; [z1, z1, z1, z2]; [z1, z1, z1, z1]; [z1, z1, z1, z1]
             output_latents, _ = ddim_sampler.fifo_onestep(
                                             cond=cond,
                                             shape=noise_shape,
@@ -224,14 +303,18 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                                             **kwargs
                                             )
             if args.lookahead_denoising:
-                latents[:,:,midpoint_idx:end_idx] = output_latents[:,:,-(num_frames_per_gpu//2):]
+                latents[:,:,midpoint_idx:end_idx] = output_latents[:,:,-(num_frames_per_gpu//2):] 
+                # [z1, z1, z1, z1, z1, z1, z1, z2, z3', z4']; 
+                # [z1, z1, z1, z1, z1, z1', z2', z3', z4', z5]; 
+                # [z1, z1, z1', z1', z1', z2', z3', z4', z5, z6]; 
+                # [z1, z1, z1', z1', z2', z3', z4', z5, z6, z7]; 
             else:
                 latents[:,:,start_idx:end_idx] = output_latents
             del output_latents
         
 
         # reconstruct from latent to pixel space
-        first_frame_idx = args.video_length // 2 if args.lookahead_denoising else 0
+        first_frame_idx = args.video_length // 2 if args.lookahead_denoising else 0 # 2
         frame_tensor = model.decode_first_stage_2DAE(latents[:,:,[first_frame_idx]]) # b,c,1,H,W
         image = tensor2image(frame_tensor)
         if save_frames:
@@ -239,7 +322,8 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
             image.save(fifo_path)
         fifo_video_frames.append(image)
             
-        latents = shift_latents(latents)
+        ## Tihs step dequeue the fully denoised one and enqueue a fully noise one
+        latents = shift_latents(latents) 
 
     return fifo_video_frames
 
@@ -287,7 +371,7 @@ def fifo_ddim_sampling_multiprompts(args, model, conditioning, noise_shape, ddim
     fifo_video_frames = []
 
     timesteps = ddim_sampler.ddim_timesteps
-    indices = np.arange(args.num_inference_steps)
+    indices = np.arange(args.num_inference_steps) # n * f
 
     if args.lookahead_denoising:
         timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps])

@@ -14,3 +14,4 @@ xformers
 open_clip_torch
 opencv_python
 decord
+numpy==1.24.1

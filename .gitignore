@@ -9,9 +9,11 @@ opensoraplan_models/
 # venvs
 .fifo
 .sora
+dcgm
 
 # others
 taming
 .DS_Store
 __pycache__
 Open-Sora-Plan
+
