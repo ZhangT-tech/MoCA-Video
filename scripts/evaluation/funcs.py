@@ -12,6 +12,27 @@ from lvdm.models.samplers.ddim import DDIMSampler
 import torch.fft as fft
 import math
 
+global_counter = 0
+
+def gaussian_low_pass_filter(shape, d_s=0.25, d_t=0.25):
+    # """
+    # Compute the gaussian low pass filter mask.
+
+    # Args:
+    #     shape: shape of the filter (volume)
+    #     d_s: normalized stop frequency for spatial dimensions (0.0-1.0)
+    #     d_t: normalized stop frequency for temporal dimension (0.0-1.0)
+    # """
+    T, H, W = shape[-3], shape[-2], shape[-1]
+    mask = torch.zeros(shape)
+    if d_s==0 or d_t==0:
+        return mask
+    for t in range(T):
+        for h in range(H):
+            for w in range(W):
+                d_square = (((d_s/d_t)*(2*t/T-1))**2 + (2*h/H-1)**2 + (2*w/W-1)**2)
+                mask[..., t,h,w] = math.exp(-1/(2*d_s**2) * d_square)
+    return mask
 
 
 def prepare_latents(args, latents_dir, sampler):
@@ -46,11 +67,56 @@ def prepare_latents(args, latents_dir, sampler):
 
 
 def shift_latents(latents):
-    # shift latents
-    latents[:,:,:-1] = latents[:,:,1:].clone()
+    # # shift latents
+    # latents[:,:,:-1] = latents[:,:,1:].clone()
 
-    # add new noise to the last frame
-    latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    # # add new noise to the last frame
+    # latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    # return latents
+    
+    global global_counter
+
+    # try with FreeInit 
+    ## Get the latest clean frame and add noise to it
+    device = latents.device
+
+    if (global_counter+1)//4 == 0:
+        latest_clean_frame = latents[:,:,0].clone()
+        print(f"The shape of the latest clean frame is: {latest_clean_frame.shape}")
+
+        ### Shift the latents
+        latents[:,:,:-1] = latents[:,:,1:].clone()
+
+        ### Add 3D_FFT to both the latest clean frame and the Guassian noise
+        x_freq = fft.fftn(latest_clean_frame, dim=(-2, -1))
+        x_freq = fft.fftshift(x_freq, dim=(-2, -1))
+        noise_freq = fft.fftn(torch.randn_like(latest_clean_frame), dim=(-2, -1))
+        noise_freq = fft.fftshift(noise_freq, dim=(-2, -1))
+
+        # frequency mix 
+        LPF = gaussian_low_pass_filter(x_freq.shape, d_s=0.25, d_t=0.25)
+        LPF = LPF.to(device)
+        HPF = 1 - LPF
+        x_freq_low = x_freq * LPF
+        noise_freq_high = noise_freq * HPF
+        x_freq_mixed = x_freq_low + noise_freq_high
+
+        # IFFT
+        x_freq_mixed = fft.ifftshift(x_freq_mixed, dim=(-2, -1))
+        x_mixed = fft.ifftn(x_freq_mixed, dim=(-2, -1))
+
+        ## Add the mixed noise to the last frame of all the latents
+        x_mixed_real = x_mixed.real
+
+        latents[:,:,-1] = x_mixed_real
+    else:
+        # shift latents
+        latents[:,:,:-1] = latents[:,:,1:].clone()
+
+        # add new noise to the last frame
+        latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    
+    global_counter += 1
     return latents
 
 def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1.0,\
