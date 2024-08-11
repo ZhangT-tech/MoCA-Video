@@ -86,16 +86,19 @@ def main(args):
         cond = {"c_crossattn": [text_emb], "fps": fps}
 
         ## inference
-        is_run_base = not (os.path.exists(latents_dir+f"/{args.num_inference_steps}.pt") and os.path.exists(latents_dir+f"/0.pt"))
-        if not is_run_base:
-            ddim_sampler = DDIMSampler(model)
-            ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
-        else:
-            base_tensor, ddim_sampler, _ = base_ddim_sampling(model, cond, noise_shape, \
-                                                args.num_inference_steps, args.eta, args.unconditional_guidance_scale, \
-                                                latents_dir=latents_dir)
-            save_gif(base_tensor, output_dir, "origin")
+        # is_run_base = not (os.path.exists(latents_dir+f"/{args.num_inference_steps}.pt") and os.path.exists(latents_dir+f"/0.pt"))
+        # if not is_run_base:
+        #     ddim_sampler = DDIMSampler(model)
+        #     ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
+        # else:
+        #     base_tensor, ddim_sampler, _ = base_ddim_sampling(model, cond, noise_shape, \
+        #                                         args.num_inference_steps, args.eta, args.unconditional_guidance_scale, \
+        #                                         latents_dir=latents_dir)
+        #     save_gif(base_tensor, output_dir, "origin")
 
+        ddim_sampler = DDIMSampler(model)
+        ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
+  
         video_frames = fifo_ddim_sampling(
             args, model, cond, noise_shape, ddim_sampler, args.unconditional_guidance_scale, output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames
         )
@@ -130,7 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--lookahead_denoising", "-ld", action="store_false", default=True)
     parser.add_argument("--eta", "-e", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default=None, help="custom output directory")
-    parser.add_argument("--use_mp4", action="store_true", default=False, help="use mp4 format for the output video")
+    parser.add_argument("--use_mp4", action="store_true", default=True, help="use mp4 format for the output video")
     parser.add_argument("--output_fps", type=int, default=10, help="fps of the output video")
 
     args = parser.parse_args()

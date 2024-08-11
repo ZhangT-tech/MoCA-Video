@@ -22,6 +22,11 @@ def freq_mix_3d(x, noise, LPF):
 
     # frequency mix
     HPF = 1 - LPF
+    print(f"The shape of x_freq is {x_freq.shape}")
+    print(f"The shape of LPF is {LPF.shape}")
+    print(f"The shape of noise_freq is {noise_freq.shape}")
+    print(f"The shape of HPF is {HPF.shape}")
+
     x_freq_low = x_freq * LPF
     noise_freq_high = noise_freq * HPF
     x_freq_mixed = x_freq_low + noise_freq_high # mix in freq domain

@@ -11,35 +11,60 @@ sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 from lvdm.models.samplers.ddim import DDIMSampler
 import torch.fft as fft
 import math
+from utils.freeinit_utils import freq_mix_3d, get_freq_filter
+import torchvision.transforms as transforms
+from einops import rearrange, repeat
 
-global_counter = 0
+def load_images_as_tensor(image_dir, image_size=(256,256), model=None):
 
-def gaussian_low_pass_filter(shape, d_s=0.25, d_t=0.25):
-    # """
-    # Compute the gaussian low pass filter mask.
+    transform = transforms.Compose([
+        transforms.Resize(min(image_size)),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    ])
 
-    # Args:
-    #     shape: shape of the filter (volume)
-    #     d_s: normalized stop frequency for spatial dimensions (0.0-1.0)
-    #     d_t: normalized stop frequency for temporal dimension (0.0-1.0)
-    # """
-    T, H, W = shape[-3], shape[-2], shape[-1]
-    mask = torch.zeros(shape)
-    if d_s==0 or d_t==0:
-        return mask
-    for t in range(T):
-        for h in range(H):
-            for w in range(W):
-                d_square = (((d_s/d_t)*(2*t/T-1))**2 + (2*h/H-1)**2 + (2*w/W-1)**2)
-                mask[..., t,h,w] = math.exp(-1/(2*d_s**2) * d_square)
-    return mask
+    videos = []
+    ## Input Continous Frames 
+    # for img_path in glob.glob(image_dir + "/*.png"):
+    #     img = Image.open(img_path).convert("RGB")
+    #     img_tensor = transform(img)
+    #     videos.append(img_tensor)
 
+    ## Input Single Frame
+    image = Image.open(f"{image_dir}/cake.png").convert("RGB")
+    image_tensor = transform(image).unsqueeze(1)
+    videos = repeat(image_tensor, 'c t h w -> c (repeat t) h w', repeat=16)
+    print(f"The video shape is: {videos.shape}")
+    
+    
+    if isinstance(videos, list):
+        videos = torch.stack(videos, dim=0).to("cuda")
+        videos = videos.permute(1, 0, 2, 3)
+        videos = videos.unsqueeze(0)
+    else: 
+        videos = videos.unsqueeze(0).to("cuda")
 
-def prepare_latents(args, latents_dir, sampler):
+    print(f"The video shape is {videos.shape}")
+
+    b, c, t, h, w = videos.shape
+    # x = rearrange(videos, 'b c t h w -> (b t) c h w')
+    z = model.encode_first_stage_2DAE(videos)
+    # z = rearrange(z, '(b t) c h w -> b c t h w', b=b, t=t)
+    print(f"The shape of the z is {z.shape}")
+
+    return z
+
+def prepare_latents(args, latents_dir, sampler, model=None):
     latents_list = []
 
-    ## Load a tensor of video frames from the latents_dir
-    video = torch.load(latents_dir+f"/{args.num_inference_steps}.pt")
+    video = load_images_as_tensor("tests", (320, 512), model) 
+    # video = load_image_batch(get_filelist("./tests"), (40, 64))
+    # video = video.to("cuda")
+    # video = video.permute(1, 0, 2, 3)
+    # video = video.unsqueeze(0)
+    print("The shape of the video is: ", video.shape)
+  
     if args.lookahead_denoising:
         """
         To have enough initiail noisy frames to start the lookahead denoising
@@ -53,70 +78,41 @@ def prepare_latents(args, latents_dir, sampler):
             latents_list.append(latents) # [z1, z1]
 
     # This is to prepare the latents for denoising
-    for i in range(args.num_inference_steps): # n * f = 8
+    for i in range(args.num_inference_steps): 
         alpha = sampler.ddim_alphas[i] # image -> noise
         beta = 1 - alpha
-        frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) # 0, 0, 0, 0, 0, 1, 2, 3
+        frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) 
         latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
-        latents_list.append(latents) # [z1, z1, z1, z1, z1, z2, z3, z4]
+        latents_list.append(latents)
 
-    latents = torch.cat(latents_list, dim=2)
+    latents = torch.cat(latents_list, dim=2) # [1, 4, 72, 40, 64])
+    print("The latents shape is", latents.shape)  
+    # latents.unsqueeze(0)
 
-    return latents # [z1, z1, z1, z1, z1, z1, z1, z2, z3, z4] = 10 frames
+
+    return latents 
 
 
 
 def shift_latents(latents):
-    # # shift latents
+    ##### With out FreeInit #####
+    # shift latents
     # latents[:,:,:-1] = latents[:,:,1:].clone()
 
     # # add new noise to the last frame
     # latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
-    # return latents
+
+    ###### With FreeInit ######
+    anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
     
-    global global_counter
+    latents[:, :, :-1] = latents[:, :, 1:].clone()
 
-    # try with FreeInit 
-    ## Get the latest clean frame and add noise to it
-    device = latents.device
-
-    if (global_counter+1)//4 == 0:
-        latest_clean_frame = latents[:,:,0].clone()
-        print(f"The shape of the latest clean frame is: {latest_clean_frame.shape}")
-
-        ### Shift the latents
-        latents[:,:,:-1] = latents[:,:,1:].clone()
-
-        ### Add 3D_FFT to both the latest clean frame and the Guassian noise
-        x_freq = fft.fftn(latest_clean_frame, dim=(-2, -1))
-        x_freq = fft.fftshift(x_freq, dim=(-2, -1))
-        noise_freq = fft.fftn(torch.randn_like(latest_clean_frame), dim=(-2, -1))
-        noise_freq = fft.fftshift(noise_freq, dim=(-2, -1))
-
-        # frequency mix 
-        LPF = gaussian_low_pass_filter(x_freq.shape, d_s=0.25, d_t=0.25)
-        LPF = LPF.to(device)
-        HPF = 1 - LPF
-        x_freq_low = x_freq * LPF
-        noise_freq_high = noise_freq * HPF
-        x_freq_mixed = x_freq_low + noise_freq_high
-
-        # IFFT
-        x_freq_mixed = fft.ifftshift(x_freq_mixed, dim=(-2, -1))
-        x_mixed = fft.ifftn(x_freq_mixed, dim=(-2, -1))
-
-        ## Add the mixed noise to the last frame of all the latents
-        x_mixed_real = x_mixed.real
-
-        latents[:,:,-1] = x_mixed_real
-    else:
-        # shift latents
-        latents[:,:,:-1] = latents[:,:,1:].clone()
-
-        # add new noise to the last frame
-        latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+    new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
     
-    global_counter += 1
+    freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
+
+    latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
+
     return latents
 
 def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1.0,\
@@ -268,31 +264,30 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
         uc = None
     
     # Latents preparation
-    latents = prepare_latents(args, latents_dir, ddim_sampler) # [z1, z1, z1, z1, z1, z1, z1, z2, z3, z4]
-
-    num_frames_per_gpu = args.video_length # 4
+    latents = prepare_latents(args, latents_dir, ddim_sampler, model) 
+    num_frames_per_gpu = args.video_length 
     if args.save_frames:
         fifo_dir = os.path.join(output_dir, "fifo")
         os.makedirs(fifo_dir, exist_ok=True)
 
     fifo_video_frames = []
 
-    timesteps = ddim_sampler.ddim_timesteps # [1, 2, 3, 4, 5, 6, 7, 8]
-    indices = np.arange(args.num_inference_steps) # [0, 1, 2, 3, 4, 5, 6, 7]
+    timesteps = ddim_sampler.ddim_timesteps
+    indices = np.arange(args.num_inference_steps) 
 
     if args.lookahead_denoising:
-        timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps]) # [1, 1, 1, 2, 3, 4, 5, 6, 7, 8]
-        indices = np.concatenate([np.full((args.video_length//2,), 0), indices]) # [0, 0, 0, 1, 2, 3, 4, 5, 6, 7]
-    for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"): # 10 + 8 -4 = 14
-        for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)): # 2 * 2 = 4 [3, 2, 1, 0]
-            start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu # 3 * 2 = 6; 2 * 2 = 4; 1 * 2 = 2; 0 * 2 = 0
-            midpoint_idx = start_idx + num_frames_per_gpu // 2 # 6 + 2 = 8; 4 + 2 = 6; 2 + 2 = 4; 0 + 2 = 2
-            end_idx = start_idx + num_frames_per_gpu # 6 + 4 = 10 ; 4 + 4 = 8; 2 + 4 = 6; 0 + 4 = 4
+        timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps]) 
+        indices = np.concatenate([np.full((args.video_length//2,), 0), indices]) 
+    for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"):
+        for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
+            start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
+            midpoint_idx = start_idx + num_frames_per_gpu // 2 
+            end_idx = start_idx + num_frames_per_gpu 
 
-            t = timesteps[start_idx:end_idx] # [5, 6, 7, 8]; [3, 4, 5, 6]; [1, 2, 3, 4]; [1, 1, 1, 2]
-            idx = indices[start_idx:end_idx] # [4, 5, 6, 7]; [2, 3, 4, 5]; [0, 1, 2, 3]
+            t = timesteps[start_idx:end_idx] 
+            idx = indices[start_idx:end_idx]
 
-            input_latents = latents[:,:,start_idx:end_idx].clone() # [z1, z2, z3, z4] ; [z1, z1, z1, z2]; [z1, z1, z1, z1]; [z1, z1, z1, z1]
+            input_latents = latents[:,:,start_idx:end_idx].clone() 
             output_latents, _ = ddim_sampler.fifo_onestep(
                                             cond=cond,
                                             shape=noise_shape,
@@ -305,10 +300,6 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                                             )
             if args.lookahead_denoising:
                 latents[:,:,midpoint_idx:end_idx] = output_latents[:,:,-(num_frames_per_gpu//2):] 
-                # [z1, z1, z1, z1, z1, z1, z1, z2, z3', z4']; 
-                # [z1, z1, z1, z1, z1, z1', z2', z3', z4', z5]; 
-                # [z1, z1, z1', z1', z1', z2', z3', z4', z5, z6]; 
-                # [z1, z1, z1', z1', z2', z3', z4', z5, z6, z7]; 
             else:
                 latents[:,:,start_idx:end_idx] = output_latents
             del output_latents
@@ -520,7 +511,7 @@ def load_image_batch(filepath_list, image_size=(256,256)):
             frame = vidreader.get_batch([0])
             img_tensor = torch.tensor(frame.asnumpy()).squeeze(0).permute(2, 0, 1).float()
         elif ext == '.png' or ext == '.jpg':
-            img = Image.open(filepath).convert("RGB")
+            img = Image.open(filepath).convert("RGBA")
             rgb_img = np.array(img, np.float32)
             #bgr_img = cv2.imread(filepath, cv2.IMREAD_COLOR)
             #bgr_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
