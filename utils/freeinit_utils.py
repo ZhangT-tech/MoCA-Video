@@ -4,7 +4,6 @@ import torch
 import torch.fft as fft
 import math
 
-
 def freq_mix_3d(x, noise, LPF):
     """
     Noise reinitialization.
@@ -14,13 +13,22 @@ def freq_mix_3d(x, noise, LPF):
         noise: randomly sampled noise
         LPF: low pass filter
     """
+    # Ensure tensors are float32 for FFT operations
+    original_dtype = x.dtype
+    if x.dtype != torch.float32:
+        x = x.to(torch.float32)
+    if noise.dtype != torch.float32:
+        noise = noise.to(torch.float32)
+    if LPF.dtype != torch.float32:
+        LPF = LPF.to(torch.float32)
+
     # FFT
-    x_freq = fft.fftn(x, dim=(-3, -2, -1))
+    x_freq = fft.fftn(x, dim=(-3, -2, -1))  # torch.Size([3, 72, 1, 180])
     x_freq = fft.fftshift(x_freq, dim=(-3, -2, -1))
     noise_freq = fft.fftn(noise, dim=(-3, -2, -1))
     noise_freq = fft.fftshift(noise_freq, dim=(-3, -2, -1))
 
-    # frequency mix
+    # Frequency mix
     HPF = 1 - LPF
     print(f"The shape of x_freq is {x_freq.shape}")
     print(f"The shape of LPF is {LPF.shape}")
@@ -29,13 +37,18 @@ def freq_mix_3d(x, noise, LPF):
 
     x_freq_low = x_freq * LPF
     noise_freq_high = noise_freq * HPF
-    x_freq_mixed = x_freq_low + noise_freq_high # mix in freq domain
+    x_freq_mixed = x_freq_low + noise_freq_high  # Mix in freq domain
 
     # IFFT
     x_freq_mixed = fft.ifftshift(x_freq_mixed, dim=(-3, -2, -1))
     x_mixed = fft.ifftn(x_freq_mixed, dim=(-3, -2, -1)).real
 
+    # Convert back to original dtype
+    if original_dtype != torch.float32:
+        x_mixed = x_mixed.to(original_dtype)
+
     return x_mixed
+
 
 
 def get_freq_filter(shape, device, filter_type, n, d_s, d_t):
