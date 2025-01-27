@@ -2,7 +2,7 @@ import os
 import torch
 from argparse import ArgumentParser
 from pytorch_lightning import seed_everything
-from diffusers import CogVideoXPipeline, AutoencoderKLCogVideoX, CogVideoXPipeline, CogVideoXTransformer3DModel
+from diffusers import CogVideoXPipeline, AutoencoderKLCogVideoX, CogVideoXPipeline, CogVideoXTransformer3DModel, CogVideoXImageToVideoPipeline
 from diffusers.utils import export_to_video
 from transformers import T5EncoderModel
 from torchvision.utils import save_image
@@ -12,8 +12,7 @@ import numpy as np
 
 from scripts.evaluation.funcs_cog import load_prompts
 from scripts.evaluation.funcs_cog import fifo_sampling_cogvideo
-
-# Set the directory of generated results
+from pipeline.cog_fifo import CogVideoFIFOPipeline
 def set_directory(args, prompt):
     if args.output_dir is None:
         # Obtain the model name from the args
@@ -47,13 +46,29 @@ def main(args):
     ## step 1: model config
     # ================ CogvideoX ================
     # Load CogVideo components
-    model_id = "THUDM/CogVideoX-5b"
+    model_text_id = "THUDM/CogVideoX-5b"
     cog_text_pipeline = CogVideoXPipeline.from_pretrained(
-        model_id, torch_dtype=torch.float16
+        model_text_id, torch_dtype=torch.float16
     ).to("cuda")
     cog_text_pipeline.enable_sequential_cpu_offload()
-    cog_text_pipeline.vae.enable_tiling()
     cog_text_pipeline.vae.enable_slicing()
+    cog_text_pipeline.vae.enable_tiling()
+
+    model_id = "THUDM/CogVideoX-5b-I2V"
+    
+    transformer = CogVideoXTransformer3DModel.from_pretrained(model_id, subfolder="transformer", torch_dtype=torch.float16)
+    text_encoder = T5EncoderModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.float16)
+    vae = AutoencoderKLCogVideoX.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float16)
+    cog_image_pipeline = CogVideoFIFOPipeline.from_pretrained(
+        model_id, 
+        text_encoder=text_encoder,
+        transformer=transformer,
+        vae=vae,
+        torch_dtype=torch.float16
+    ).to("cuda")
+    cog_image_pipeline.enable_sequential_cpu_offload()
+    cog_image_pipeline.vae.enable_tiling()
+    cog_image_pipeline.vae.enable_slicing()
 
     ## sample shape
     assert (args.height % 16 == 0) and (args.width % 16 == 0), "Error: image size [h,w] should be multiples of 16!"
@@ -82,18 +97,18 @@ def main(args):
 
         # Encode the prompts into embeddings
         # Encode the prompts into embeddings
-        positive_embeds, negative_embeds = cog_text_pipeline.encode_prompt(
-            prompt,  # Pass the text prompt
-            device="cuda",
-            do_classifier_free_guidance=True,
-            num_videos_per_prompt=1,
-        )
+        # positive_embeds, negative_embeds = cog_text_pipeline.encode_prompt(
+        #     prompt,  # Pass the text prompt
+        #     device="cuda",
+        #     do_classifier_free_guidance=True,
+        #     num_videos_per_prompt=1,
+        # )
 
-        # Use only the positive embeddings for conditioning
-        cond = {
-            "prompts": [positive_embeds],  # Use the positive embeddings
-            "fps": fps                    # Frame rate
-        }
+        # # Use only the positive embeddings for conditioning
+        # cond = {
+        #     "prompts": torch.cat((negative_embeds, positive_embeds), dim=0),# [positive_embeds],  # Use the positive embeddings
+        #     "fps": fps                    # Frame rate
+        # }
         # Check if base video exists
         base_video_path = os.path.join(latents_dir, f"{args.num_inference_steps}.pt")
         base_output_path = os.path.join(output_dir, "base_video.mp4")
@@ -126,13 +141,16 @@ def main(args):
             torch.save(base_tensor, base_video_path)
             print(f"Base video tensor saved at: {base_video_path}")
         # Load the base video latents for further processing
-        video_frames = fifo_sampling_cogvideo(
-            args, cog_text_pipeline, cond, cfg_scale=args.unconditional_guidance_scale, 
-            output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames
-        )
-
+        # video_frames = fifo_sampling_cogvideo(
+        #     args, cog_image_pipeline, cond, cfg_scale=args.unconditional_guidance_scale, 
+        #     output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames
+        # )
+        image = base_frames[-1]
+        breakpoint()
+        video_frames = cog_image_pipeline(image=base_frames, prompt=prompt, guidance_scale=6, use_dynamic_cfg=True, num_inference_steps=args.num_inference_steps)
+        breakpoint()
         output_path = os.path.join(output_dir, "fifo_video.mp4")
-        export_to_video(video_frames, output_path, fps=args.output_fps)
+        export_to_video(np.concatenate(video_frames), output_path, fps=args.output_fps)
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -157,8 +175,8 @@ if __name__ == "__main__":
     parser.add_argument("--rank", type=int, default=0, help="rank of the process(0~num_processes-1)")
 
     # Output Settings
-    parser.add_argument("--save_frames", action="store_true", help="Save individual frames during generation")
-    parser.add_argument("--output_fps", type=int, default=10, help="FPS of the output video")
+    parser.add_argument("--save_frames", default=True, action="store_true", help="Save individual frames during generation")
+    parser.add_argument("--output_fps", type=int, default=8, help="FPS of the output video")
 
     # Miscellaneous
     parser.add_argument("--eta", "-e", type=float, default=1.0)

@@ -13,6 +13,55 @@ from accelerate import Accelerator
 accelerator = Accelerator()
 sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 from utils.freeinit_utils import freq_mix_3d, get_freq_filter
+from sam2.build_sam import build_sam2
+from sam2.sam2_video_predictor import SAM2VideoPredictor
+from PIL import Image
+from diffusers.utils import export_to_video
+import torch.nn as nn
+
+def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
+    """
+    Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
+    Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
+    """
+    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
+    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
+    # rescale the results from guidance (fixes overexposure)
+    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
+    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
+    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    return noise_cfg
+
+
+@torch.no_grad()
+def visualize_latents(latents, output_dir, step, model):
+    """
+    Decodes latents into images and saves them for visualization.
+    
+    Args:
+        latents (torch.Tensor): The latent tensor to decode.
+        output_dir (str): Directory to save the images.
+        step (int): The current denoising step.
+        model: The model to decode the latents.
+    """
+    # Decode latents
+    decoded_frames = model.decode_latents(latents)
+    decoded_frames = decoded_frames.squeeze(0).permute(1, 0, 2, 3)
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save each frame as an image
+    for i, frame in enumerate(decoded_frames):
+        # Convert tensor to PIL image
+        frame_np = (frame.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        image = Image.fromarray(frame_np)
+        
+        # Save image with a unique filename
+        image.save(os.path.join(output_dir, f"latent_step_{step:03d}_frame_{i:03d}.png"))
+
+    print(f"Saved latent visualizations for step {step}.")
+
 def print_gpu_usage():
     print(f"GPU Memory Usage:")
     print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
@@ -21,69 +70,162 @@ def print_gpu_usage():
     print(f"Max Reserved:  {torch.cuda.max_memory_reserved() / 1024**3:.2f} GB")
     print("=" * 50)
 
-def prepare_latents(args, latents_dir):
-    latents_list = []
+def prepare_latents(args, latents_dir, model):
+    latents_list = []    
     # Load pre-saved latents from the directory
     video = torch.load(latents_dir + f"/{args.num_inference_steps}.pt")
-    print(f"Loaded video latents with shape: {video.shape}") # torch.Size([3, 480, 49, 720])
+    print(f"Loaded video latents with shape: {video.shape}")  # torch.Size([3, 480, 49, 720])
+    breakpoint()
+    last_frame = video[:, :, -1, :]
+    last_frame_np = (last_frame.permute(1, 2, 0).cpu().numpy())
+    last_frame_np = ((last_frame_np - last_frame_np.min())/ (last_frame_np.max() - last_frame_np.min()) * 255).astype(np.uint8)
+    image = Image.fromarray(last_frame_np)
 
-    # Handle lookahead denoising
-    if args.lookahead_denoising:
-        for i in range(args.video_length // 2):
-            # Generate noisy frames for lookahead denoising
-            noise = torch.randn_like(video[:, :, [0]])  # Random noise
-            latents = 0.5**(0.5) * video[:, :, [0]] + (1 - 0.5)**(0.5) * noise  # Fixed scaling
-            latents_list.append(latents)
+    latents_channels = model.transformer.config.in_channels // 2
+    latents, image_latents = model.prepare_latents(
+        image, 
+        batch_size,
+        latent_channels,
+        num_frames,
+        height,
+        width,
+        torch.float16,
+        device,
+        generator,
+    )
 
-    # Prepare latents for each inference step
-    for i in range(args.num_inference_steps):
-        # Simulate the noise schedule (linear approximation)
-        alpha = 1.0 - (i / args.num_inference_steps)  # Linear noise schedule
-        beta = 1.0 - alpha
-        frame_idx = max(0, i - (args.num_inference_steps - args.video_length))
-        
-        # Add noise to the current frame
-        noise = torch.randn_like(video[:, :, [frame_idx]])  # Random noise
-        latents = (alpha)**0.5 * video[:, :, [frame_idx]] + (beta)**0.5 * noise
-        latents_list.append(latents)
+    # # Convert 3-channel latents to 4-channel format (e.g., add an alpha channel)
+    # if video.shape[0] == 3:
+    #     alpha_channel = torch.ones_like(video[:1, :, :, :])  # Create an alpha channel filled with 1s
+    #     video = torch.cat([video, alpha_channel], dim=0)  # Concatenate along the channel dimension
+    #     print(f"Converted video to 4-channel format with shape: {video.shape}")
 
-    # Concatenate all latents along the temporal dimension
-    latents = torch.cat(latents_list, dim=2)  # Shape: [batch, channels, frames, height, width]
-    print(f"Final latents shape: {latents.shape}") # torch.Size([3, 480, 72, 720])
+    # # Handle lookahead denoising
+    # if args.lookahead_denoising:
+    #     """
+    #     To have enough initiail noisy frames to start the lookahead denoising
+    #     Generate dummy noisy frames for the first half of the video
+    #     """
+    #     for i in range(args.video_length // 2):
+    #         alpha = model.scheduler.alphas[0]
+    #         beta = 1 - alpha
+    #         latents = alpha**(0.5) * video[:,:,[0]] + beta**(0.5) * torch.randn_like(video[:,:,[0]])
+    #         latents_list.append(latents) # [z1, z1]
+
+    # # Prepare latents for each inference step
+    # for i in range(args.num_inference_steps):
+    #     # Simulate the noise schedule (linear approximation)
+    #     alpha = model.scheduler.alphas[i]
+    #     beta = 1 - alpha
+    #     frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) 
+    #     latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
+    #     latents_list.append(latents)
+
+    # # Concatenate all latents along the temporal dimension
+    # latents = torch.cat(latents_list, dim=2)  # Shape: [batch, channels, frames, height, width]
+    # print(f"Final latents shape: {latents.shape}")  # torch.Size([4, 480, 72, 720])
 
     return latents
 
-def shift_latents(latents):
-    anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
+def shift_latents(latents, output_dir, index):
+    anchor_frame = latents[:, 0].clone().unsqueeze(2) # b,c,1,h,w
+    ## Decode the anchor frame
+    clean_image = tensor2image(anchor_frame)
+    breakpoint()
+    clean_image.save(f"{output_dir}/fifo/{index}:03d.png")
     latents[:, :, :-1] = latents[:, :, 1:].clone()
     new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
     freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
     latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
     return latents
 
+def video_segmentation_with_sam2(video_path, output_dir, text_prompt, model_cfg, checkpoint, device="cuda"):
+    """
+    Segment objects in a video using SAM2 with temporal tracking.
+
+    Args:
+        video_path (str): Path to the input video.
+        output_dir (str): Directory to save the output.
+        text_prompt (str): Text prompt for segmentation.
+        model_cfg (str): Path to SAM2 model configuration file.
+        checkpoint (str): Path to SAM2 model checkpoint.
+        device (str): "cuda" or "cpu".
+    """
+    # Load video
+    sam2_checkpoint = "../sam2.1_hiera_large.pt"
+    model_cfg = "configs/sam2.1_hiera_l.yaml"
+
+    cap = cv2.VideoCapture(video_path)
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Initialize SAM2
+    sam2_model = build_sam2(model_cfg, checkpoint, device=device)
+    video_predictor = SAM2VideoPredictor(sam2_model)
+
+    # Process frames with SAM2
+    frames = []
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))  # Convert to RGB for SAM2
+
+    frames = np.stack(frames)  # (num_frames, H, W, C)
+
+    # Generate masks for the entire video
+    video_predictor.set_video(frames, text_prompt=text_prompt)
+    masks, scores = video_predictor.predict()
+
+    # Save results
+    os.makedirs(output_dir, exist_ok=True)
+    for i, mask in enumerate(masks):
+        mask_overlay = cv2.addWeighted(frames[i], 0.5, mask * 255, 0.5, 0)
+        cv2.imwrite(os.path.join(output_dir, f"frame_{i:03d}_mask.png"), mask_overlay)
+
+    # Release resources
+    cap.release()
+    print(f"Processed video saved in {output_dir}")
+
 @torch.no_grad()
 def fifo_sampling_cogvideo(args, model, conditioning, cfg_scale=1.0, output_dir=None,
                            latents_dir=None, save_frames=False, save_mid_steps=False,
                            save_mid_steps_every=10, **kwargs):
 
+    generator = torch.Generator().manual_seed(321)
+
     model = accelerator.prepare(model)
     device = torch.device("cuda")
     batch_size = 1  # Fixed to 1 since CogVideo generates videos one prompt at a time.
     kwargs.update({"clean_cond": True})
+    num_frames = args.video_length // 2 + args.num_inference_steps
+    num_channels_latents = model.transformer.config.in_channels
 
     # Prepare initial latents
-    latents = prepare_latents(args, latents_dir).to(torch.float16).permute(0, 2, 1, 3).contiguous()  # Initialize noisy latents
-    latents = torch.nn.functional.interpolate(
-        latents, size=(latents.shape[2] // 4, latents.shape[3] // 4), mode="bilinear"
+    video = torch.load(latents_dir + f"/{args.num_inference_steps}.pt")
+    print(f"Loaded video latents with shape: {video.shape}")  # torch.Size([3, 480, 49, 720])
+    height = video.shape[1]
+    width = video.shape[3]
+    last_frame = video[:, :, -1, :].unsqueeze(0)
+    print(f"Last frame shape: {last_frame.shape}")
+
+    # encoder_states = conditioning["prompts"].to(torch.float16)
+    encoder_states = conditioning["prompts"].to(torch.float16) # torch.cat([prompt for prompt in conditioning["prompts"]], dim=0).to(torch.float16)
+    latents_channels = model.transformer.config.in_channels // 2
+    latents, image_latents = model.prepare_latents(
+        last_frame, 
+        batch_size,
+        latents_channels,
+        num_frames,
+        height,
+        width,
+        torch.float16,
+        device,
+        generator,
     )
-
-    num_frames_per_partition = args.video_length // args.num_partitions
-
-    if save_frames:
-        fifo_dir = os.path.join(output_dir, "fifo")
-        os.makedirs(fifo_dir, exist_ok=True)
-
-    fifo_video_frames = []
+    
 
     scheduler_name = "ddim"
     scheduler = (DDPMScheduler if scheduler_name == 'ddpm' else DDIMScheduler).from_pretrained(
@@ -91,91 +233,54 @@ def fifo_sampling_cogvideo(args, model, conditioning, cfg_scale=1.0, output_dir=
     )
     model.scheduler = scheduler 
     print(f"After initializing scheduler:")
-    
+
     # Set up timesteps
     model.scheduler.set_timesteps(args.num_inference_steps, device=device)
     timesteps = model.scheduler.timesteps
     print(f"Set up timesteps")
-    num_frames_per_gpu = args.video_length
-    
-    if args.lookahead_denoising:
-        # Prepare timesteps with lookahead denoising logic
-        timesteps = np.concatenate([
-            np.full((args.video_length // 2,), timesteps[0].cpu().numpy()),
-            timesteps.cpu().numpy()
-        ]).reshape(-1)  # Ensure 1D array
 
-    # Total number of iterations as per Videocrafter
-    total_iterations = args.new_video_length + args.num_inference_steps - args.video_length # 148
-    for i in trange(total_iterations, desc="FIFO Sampling"):
-        for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
-            start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
-            midpoint_idx = start_idx + num_frames_per_gpu // 2
-            end_idx = start_idx + num_frames_per_gpu
-            print(f"the start index is {start_idx} and end index is {end_idx}")
+    for i, t in enumerate(tqdm(timesteps)):
+        latent_model_input = torch.cat([latents] * 2)
+        latent_model_input = model.scheduler.scale_model_input(latent_model_input, t)
+        latent_image_input = torch.cat([image_latents] * 2)
+        latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
 
-            t = timesteps[start_idx:end_idx]
-            # Extract partition latents
-            input_latents = latents[:, start_idx:end_idx, :, :].clone() # latents shape: torch.Size([3, 480, 72, 720])
-            # AMP for mixed precision
-            with autocast():
-                # Scale latents
-                model_input = scheduler.scale_model_input(input_latents, t).unsqueeze(0)
+        timestep = t.expand(latent_model_input.shape[0]) 
+        
+        image_rotary_emb = (
+            model._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
+            if model.transformer.config.use_rotary_positional_embeddings
+            else None
+        ) 
 
-                # Prepare timestep and encoder states
-                timestep = torch.tensor([t], dtype=torch.long, device=device).reshape(-1)
-                encoder_states = torch.cat([prompt for prompt in conditioning["prompts"]], dim=0).to(torch.float16)
+        noise_pred = model.transformer(
+            hidden_states=latent_model_input, # torch.Size([2, 18, 32, 60, 90])
+            encoder_hidden_states=encoder_states, # torch.Size([2, 226, 4096])
+            timestep=timestep,
+            image_rotary_emb=image_rotary_emb, # torch.Size([24300, 64])
+            return_dict=False,
+        )[0] # torch.Size([2, 18, 16, 60, 90])
+        # compute the previous noisy sample x_t -> x_t-1
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_text - noise_pred_uncond)
+        if cfg_scale > 0.0:
+            # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+            noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, cfg_scale)
+        
+        print(f"Noise prediction shape: {noise_pred.shape}")
 
-                # Predict noise
-                noise_pred = model.transformer(
-                    hidden_states=model_input, # torch.Size([1, 3, 16, 120, 180])
-                    encoder_hidden_states=encoder_states, # torch.Size([1, 226, 4096])
-                    timestep=timestep, # torch.Size([16])
-                    image_rotary_emb=None,
-                    return_dict=False,
-                )[0] #  torch.Size([1, 3, 256, 120, 180])
-   
-                # Perform guidance
-                # breakpoint()
-                # noise_pred_uncond, noise_pred_text = noise_pred.chunk(2, dim=1) # torch.Size([1, 2, 256, 120, 180]), torch.Size([1, 1, 256, 120, 180])
-                # noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_text - noise_pred_uncond) # torch.Size([1, 2, 256, 120, 180])
+        output = model.scheduler.step(
+            noise_pred, t, latents, return_dict=True
+        )
+        
+        latents = output['prev_sample']
+        # visualize_latents(latents, os.path.join(output_dir, "latent_visualizations"), i, model)
 
-                # Update latents
-                # Move noise_pred and input_latents to GPU
-                timestep = timestep.cpu()
-                print(f"noise_pred device: {noise_pred.device}")
-                print(f"timestep device: {timestep.device}")
-                print(f"input_latents device: {input_latents.device}")
-                next_latents = input_latents.clone().detach()
-                for idx in range(timestep.shape[0]): 
-                    next_latents = scheduler.step(noise_pred[:, :, (idx * 16):((idx+1) * 16), :, :], timestep[idx], next_latents)[0]
+    video = model.decode_latents(latents)
+    videos = model.video_processor.postprocess_video(video=video, output_type='np')
 
-            # Update latents based on lookahead denoising or standard
-            
-            if args.lookahead_denoising:
-                latents[:, midpoint_idx:end_idx] = next_latents[:, :,  -(num_frames_per_partition * 2):].squeeze(0)
-            else:
-                latents[:, start_idx:end_idx] = next_latents
-
-            del input_latents, model_input, next_latents, noise_pred
-            torch.cuda.empty_cache()
-            print("Clear cache")
-
-
-
-        # Decode the current denoised frame (optional visualization)
-        if save_frames:
-            frame_tensor = model.vae.decode(latents[:, :, [0]])  # Decode first frame in latents
-            image = tensor2image(frame_tensor)
-            image.save(f"{fifo_dir}/{i:03d}.png")
-            fifo_video_frames.append(image)
-
-        # Shift latents for the next timestep
-        latents = shift_latents(latents)
-
-    return fifo_video_frames
-
-
+    torch.cuda.empty_cache()  # Clear GPU cache to free up memory
+    return videos
 
 def get_filelist(data_dir, ext='*'):
     file_list = glob.glob(os.path.join(data_dir, '*.%s'%ext))

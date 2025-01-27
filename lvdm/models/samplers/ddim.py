@@ -229,7 +229,9 @@ class DDIMSampler(object):
         noise_pred = self.unet(latents, cond, ts,
                                 unconditional_guidance_scale=unconditional_guidance_scale,
                                 unconditional_conditioning=unconditional_conditioning,
-                                **kwargs)
+                                **kwargs) # torch.Size([1, 4, 16, 40, 64])
+
+        breakpoint()
         
         latents, pred_x0 = self.ddim_step(latents, noise_pred, indices)
 

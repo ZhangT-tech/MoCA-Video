@@ -1,6 +1,16 @@
 # results
 results/
 
+# Un-cogvideo stuff
+.logs
+assets
+configs
+dcgm
+lvdm
+opensora_fifo
+prompts
+
+
 # checkpoints
 videocrafter_models/
 zeroscope_models/
@@ -16,4 +26,7 @@ taming
 .DS_Store
 __pycache__
 Open-Sora-Plan
-
+results/
+checkpoints/
+deletes/
+llama-3-8b-Instruct/

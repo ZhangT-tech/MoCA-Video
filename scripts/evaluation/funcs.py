@@ -58,11 +58,12 @@ def load_images_as_tensor(image_dir, image_size=(256,256), model=None):
 def prepare_latents(args, latents_dir, sampler, model=None):
     latents_list = []
 
-    video = load_images_as_tensor("tests", (320, 512), model) 
+    # video = load_images_as_tensor("tests", (320, 512), model) 
     # video = load_image_batch(get_filelist("./tests"), (40, 64))
     # video = video.to("cuda")
     # video = video.permute(1, 0, 2, 3)
     # video = video.unsqueeze(0)
+    video = torch.load(latents_dir+f"/{args.num_inference_steps}.pt")
     print("The shape of the video is: ", video.shape)
   
     if args.lookahead_denoising:
@@ -378,6 +379,7 @@ def fifo_ddim_sampling_multiprompts(args, model, conditioning, noise_shape, ddim
 
         cond.update({'c_crossattn':[embed]})
         for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
+            breakpoint()
             start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
             midpoint_idx = start_idx + num_frames_per_gpu // 2
             end_idx = start_idx + num_frames_per_gpu
