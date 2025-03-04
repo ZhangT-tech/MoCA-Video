@@ -3,7 +3,20 @@ from tqdm import tqdm
 import torch
 from lvdm.models.utils_diffusion import make_ddim_sampling_parameters, make_ddim_timesteps
 from lvdm.common import noise_like
-
+import os
+import torchvision
+import sys
+from pathlib import Path
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+import torch.nn.functional as F
+import logging
+logging.getLogger().setLevel(logging.ERROR)  # Only show ERROR messages
+logging.disable(logging.INFO)
+logging.disable(logging.DEBUG)
+logging.disable(logging.WARNING)
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+from PIL import Image
 
 class DDIMSampler(object):
     """
@@ -15,6 +28,31 @@ class DDIMSampler(object):
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule 
         self.counter = 0
+        
+        # Initialize SAM2 and Grounding DINO once
+        grounded_sam_path = self.setup_grounded_sam_paths()
+        sam2_checkpoint = os.path.join(grounded_sam_path, 'checkpoints/sam2.1_hiera_large.pt')
+        
+        if not os.path.exists(sam2_checkpoint):
+            raise RuntimeError(f"SAM2 checkpoint not found at {sam2_checkpoint}")
+        
+        # Initialize SAM2
+        self.sam2_model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', sam2_checkpoint, device="cuda")
+        self.sam2_predictor = SAM2ImagePredictor(self.sam2_model)
+        
+        # Initialize Grounding DINO
+        grounding_model_id = "IDEA-Research/grounding-dino-tiny"
+        self.processor = AutoProcessor.from_pretrained(grounding_model_id)
+        self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            grounding_model_id,
+            torch_dtype=torch.float16
+        ).to("cuda").half()
+
+        # Initialize DINO model
+        self.dino_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
+        self.dino_model = self.dino_model.to("cuda").to(torch.float16)
+        self.dino_model.eval()
+
 
     def register_buffer(self, name, attr):
         """
@@ -211,7 +249,7 @@ class DDIMSampler(object):
             # the img is the intermediate state of the latent variable x at each timestep
             # pred_x0 is the model's prediction of the original data at each timestep
             img, pred_x0 = outs 
-            # The update for the intermediates?
+            
         if latents_dir is not None:
             torch.save(img, f"{latents_dir}/{total_steps}.pt")
 
@@ -219,21 +257,19 @@ class DDIMSampler(object):
 
     @torch.no_grad()
     def fifo_onestep(self, cond, shape, latents=None, timesteps=None, indices=None,
-                     unconditional_guidance_scale=1., unconditional_conditioning=None,
+                     unconditional_guidance_scale=1., unconditional_conditioning=None, 
+                     cond_image=None, target=None,
                      **kwargs):
-        #How does it apply diagonal denoising?# 
+
         device = self.model.betas.device        
         b, _, f, _, _ = shape
-
         ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long) # [16]
         noise_pred = self.unet(latents, cond, ts,
                                 unconditional_guidance_scale=unconditional_guidance_scale,
                                 unconditional_conditioning=unconditional_conditioning,
                                 **kwargs) # torch.Size([1, 4, 16, 40, 64])
-
-        breakpoint()
         
-        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices)
+        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts)
 
         return latents, pred_x0
 
@@ -341,42 +377,83 @@ class DDIMSampler(object):
         return e_t
 
     @torch.no_grad()
-    def ddim_step(self, sample, noise_pred, indices):
+    def ddim_step(self, sample, noise_pred, indices, cond_image, target, ts):
         b, _, f, *_, device = *sample.shape, sample.device
 
         alphas = self.ddim_alphas
         alphas_prev = self.ddim_alphas_prev
         sqrt_one_minus_alphas = self.ddim_sqrt_one_minus_alphas
         sigmas = self.ddim_sigmas
-        # select parameters corresponding to the currently considered timestep
         
         size = (b, 1, 1, 1, 1)
         
         x_prevs = []
         pred_x0s = []
 
+        pre_masks = None
+        
+        # Initialize momentum if not already done
+        if not hasattr(self, 'momentum'):
+            self.momentum = torch.zeros_like(sample)
+            self.beta = 0.9  # Momentum decay rate
+            
+        # Store previous frame for gradient calculation
+        prev_frame = None
+
         for i, index in enumerate(indices):
             x = sample[:, :, [i]]
             e_t = noise_pred[:, :, [i]]
+            timestep = ts[i]
             a_t = torch.full(size, alphas[index], device=device)
             a_prev = torch.full(size, alphas_prev[index], device=device)
             sigma_t = torch.full(size, sigmas[index], device=device)
             sqrt_one_minus_at = torch.full(size, sqrt_one_minus_alphas[index],device=device)
-            # current prediction for x_0
+            
+            # Current prediction for x_0
             pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-            # direction pointing to x_t
+            
+            # Direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
             
+            # Calculate motion gradient if we have a previous frame
+            if prev_frame is not None:
+                # Calculate frame difference as a simple gradient
+                motion_gradient = pred_x0 - prev_frame
+                
+                # Incorporate dir_xt into the gradient calculation
+                # This helps align the motion with the diffusion direction
+                motion_gradient = motion_gradient + 0.05 * dir_xt
+                
+                # Update momentum using the equation: v_t = β * v_{t-1} + (1-β) * gradient
+                self.momentum[:, :, [i]] = (
+                    self.beta * self.momentum[:, :, [i-1]] + 
+                    (1 - self.beta) * motion_gradient
+                )
+                
+                # Apply motion correction with adaptive strength based on timestep
+                correction_strength = 0.1 * (1.0 - timestep / 1000.0)  # Stronger correction at later timesteps
+                pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
+            
+            # Store current frame for next iteration
+            prev_frame = pred_x0.detach()
+            
             noise = sigma_t * noise_like(x.shape, device)
-
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+            
+            ## Apply the cond_img to the predicted x_0
+            if timestep <= 300:
+                pred_x0, masks = self.apply_cond_img(pred_x0, cond_image, target, i, pre_masks) # torch.Size([1, 4, 1, 40, 64])
+                pre_masks = masks
+                gamma = 0.5
+                pred_x0 = pred_x0 + gamma * noise
+            
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
 
         x_prev = torch.cat(x_prevs, dim=2)
         pred_x0 = torch.cat(pred_x0s, dim=2)
 
-        return x_prev, pred_x0
+        return x_prev, pred_x0 # torch.Size([1, 4, 16, 40, 64])
 
     @torch.no_grad()
     def stochastic_encode(self, x0, t, use_original_steps=False, noise=None):
@@ -421,3 +498,237 @@ class DDIMSampler(object):
                                           unconditional_conditioning=unconditional_conditioning)
         return x_dec
 
+    def visualize_sampling(self, pred_x0, noise, save_dir, step, is_manipulated=False):
+        """Visualize the sampling process
+        
+        Args:
+            x_prev (torch.Tensor): Noisy sample for next step [B,C,T,H,W]
+            pred_x0 (torch.Tensor): Predicted denoised image [B,C,T,H,W]
+            noise (torch.Tensor): Added noise [B,C,T,H,W]
+            save_dir (str): Directory to save visualizations
+            step (int): Current sampling step
+            is_manipulated (bool): Whether pred_x0 has been manipulated
+        """
+        # Create step subfolder with manipulation status
+        status = "after_manipulation" if is_manipulated else "before_manipulation"
+        step_dir = os.path.join(save_dir, f'step_{step:03d}_{status}')
+        os.makedirs(step_dir, exist_ok=True)
+        
+        # Function to process tensor for visualization
+        def process_for_vis(tensor):
+            # Move to CPU, take first batch and normalize to [0,1]
+            vis = tensor[0].detach().cpu()  # Remove batch dim
+            vis = (vis - vis.min()) / (vis.max() - vis.min())  # Normalize
+            return vis
+
+        # Save each frame
+        
+        grid = torch.stack([
+            process_for_vis(pred_x0[:,:,0]),
+            process_for_vis(noise[:,:,0])
+        ])
+        
+        # Save grid in step subfolder
+        torchvision.utils.save_image(
+            grid,
+            os.path.join(step_dir, f'frame_{0:03d}.png'),
+            nrow=2,
+            normalize=False
+        )
+
+    def setup_grounded_sam_paths(self):
+        """Setup paths for Grounded SAM2 modules"""
+        grounded_sam_path = "/ibex/user/zhant0g/code/VidStoryCraft/Grounded-SAM-2"
+
+        if not os.path.exists(grounded_sam_path):
+            raise RuntimeError(f"Grounded-SAM-2 directory not found at {grounded_sam_path}")
+
+        # Add to Python path
+        if str(grounded_sam_path) not in sys.path:
+            sys.path.append(str(grounded_sam_path))
+            
+        return grounded_sam_path
+    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks):
+        """Apply conditioning image to predicted x0 using Grounded SAM
+        
+        Args:
+            pred_x0 (torch.Tensor): Predicted x0 image [B,C,T,H,W]
+            cond_image (torch.Tensor): Conditioning image to apply
+            target (str): Text prompt for segmentation
+            
+        Returns:
+            torch.Tensor: Modified pred_x0 with cond_image applied to segmented region
+        """
+        # Now use the pre-initialized models
+        # Convert tensor to PIL Image if needed
+        if isinstance(pred_x0, torch.Tensor):
+            image_np = pred_x0.cpu().numpy()
+            # Remove batch dimension if present
+        if len(image_np.shape) == 5:  # [B, C, F, H, W]
+            image_np = image_np.squeeze(2).squeeze(0)  # Now [C, F, H, W]
+        # Extract frame and convert to correct format [H, W, C]
+        
+        frame = np.transpose(image_np, (1, 2, 0))  # Convert to [H, W, C]
+
+        if frame.shape[-1] != 3:
+            if frame.shape[-1] == 1:
+                frame = np.repeat(frame, 3, axis=-1)
+            else:
+                frame = frame[:, :, :3]
+
+        # Scale to [0, 255] if in [0, 1]
+        if np.floor(frame.max()) <= 1.0:
+            frame = (frame * 255).astype(np.uint8)
+        else:
+            frame = frame.astype(np.uint8)
+            
+        frame_pil = Image.fromarray(frame)
+        
+        # Process frame with SAM2
+        self.sam2_predictor.set_image(np.array(frame_pil.convert("RGB")))
+        
+        # Get boxes from Grounding DINO
+        inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
+        # Move inputs to device and convert float tensors to float16
+        inputs = {
+            k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else 
+                v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else 
+                v.to("cuda"))
+            for k, v in inputs.items() 
+            if isinstance(v, torch.Tensor)
+        }
+                    
+        # Ensure all float tensors are float16
+        with torch.cuda.amp.autocast():
+            with torch.no_grad():
+                outputs = self.grounding_model(**inputs)
+        
+        results = self.processor.post_process_grounded_object_detection(
+            outputs,
+            inputs['input_ids'],
+            box_threshold=0.4,
+            text_threshold=0.3,
+            target_sizes=[frame_pil.size[::-1]]
+        )
+        
+        input_boxes = results[0]["boxes"].cpu().numpy()
+        if input_boxes.shape[0] == 0:
+            ## Use the previous masks
+            if pre_masks is None:
+                return pred_x0, None
+            else:
+                masks = pre_masks
+        else:
+            # Get masks from SAM2
+            masks, _, _ = self.sam2_predictor.predict(
+                point_coords=None,
+                point_labels=None,
+                box=input_boxes,
+                multimask_output=False,
+            )
+
+            ## Add that if the new generated mask is too deviated from the previous mask, use the previous mask using IOU 
+            if pre_masks is not None:
+                iou = self.calculate_iou(masks, pre_masks)
+                if iou < 0.5:
+                    masks = pre_masks
+            
+            # Convert masks to correct device and format
+            masks = torch.from_numpy(masks) # [N,H,W]
+            
+        # Create a copy of pred_x0 to modify
+        modified_pred_x0 = pred_x0.clone()
+
+        # For each mask in the batch
+        for mask in masks:
+            if mask.sum() == mask.shape[0] * mask.shape[1]:
+                modified_pred_x0 = pred_x0
+                continue
+            # Expand mask to match channels
+            try:
+                mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+                if len(mask.shape) == 4:
+                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
+                else:
+                    print(mask.shape)
+                    mask = mask.squeeze(0).expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
+            except Exception as e:
+                breakpoint()
+
+            ## Apply the cond_image to the masked pred_x0 region
+            if cond_image.shape[1] != pred_x0.shape[1]:
+                if cond_image.shape[1] == 3:
+                    #3 Add Alpha Channel
+                    alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
+                    cond_image = torch.cat([cond_image, alpha_channel], dim=1)
+                else:
+                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
+            
+            # More aggressive version
+            enhancement_factor = 1.2  # Boost the conditional image intensity
+
+            modified_pred_x0 = torch.where(
+                mask.to(pred_x0.device) > 0.5,
+                cond_image * enhancement_factor,  # Boosted conditional image
+                modified_pred_x0
+            )
+        return modified_pred_x0, masks
+
+    def visualize_masks(self, masks, save_dir, step):
+        """Visualize the segmentation masks"""
+
+        # Create masks subfolder in step directory
+        masks_dir = os.path.join(save_dir, f'step_{step:03d}_masks')
+        os.makedirs(masks_dir, exist_ok=True)
+        
+        # Convert masks to tensor if they're numpy arrays
+        if isinstance(masks, np.ndarray):
+            masks = torch.from_numpy(masks).float()  # Ensure float first
+        
+        # Process each mask
+        for i, mask in enumerate(masks):
+            # Convert to numpy, scale to [0, 255], and save directly as PIL Image
+            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np)
+            mask_pil.save(os.path.join(masks_dir, f'mask_{i:03d}.png'))
+            
+    def calculate_iou(self, masks1, masks2):
+        """Calculate Intersection over Union (IoU) between two sets of masks.
+        
+        Args:
+            masks1 (numpy.ndarray or torch.Tensor): First set of masks [N,H,W]
+            masks2 (numpy.ndarray or torch.Tensor): Second set of masks [N,H,W]
+            
+        Returns:
+            float: Average IoU score across all mask pairs
+        """
+        # Convert to torch tensors if needed
+        if isinstance(masks1, np.ndarray):
+            masks1 = torch.from_numpy(masks1)
+        if isinstance(masks2, np.ndarray):
+            masks2 = torch.from_numpy(masks2)
+        
+        # Ensure masks are binary
+        masks1 = masks1 > 0.5
+        masks2 = masks2 > 0.5
+        
+        # Calculate IoU for each pair of masks
+        ious = []
+        for mask1, mask2 in zip(masks1, masks2):
+            mask1 = mask1.to(masks2.device)
+            intersection = torch.logical_and(mask1, mask2).sum().float()
+            union = torch.logical_or(mask1, mask2).sum().float()
+            
+            # Handle edge case where union is 0
+            if union == 0:
+                if intersection == 0:  # Both masks are empty
+                    iou = 1.0
+                else:  # This shouldn't happen mathematically
+                    iou = 0.0
+            else:
+                iou = intersection / union
+            ious.append(iou)
+        
+        # Return average IoU
+        return torch.tensor(ious).mean().item()
+            

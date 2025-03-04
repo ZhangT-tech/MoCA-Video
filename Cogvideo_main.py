@@ -1,4 +1,5 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 from argparse import ArgumentParser
 from pytorch_lightning import seed_everything
@@ -9,15 +10,21 @@ from torchvision.utils import save_image
 from torchvision.transforms import ToTensor
 from tqdm import tqdm
 import numpy as np
+from PIL import Image
+from torchvision import transforms
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 from scripts.evaluation.funcs_cog import load_prompts
 from scripts.evaluation.funcs_cog import fifo_sampling_cogvideo
 from pipeline.cog_fifo import CogVideoFIFOPipeline
+from pipeline.cog_original import CogVideoOriginalPipeline
 def set_directory(args, prompt):
     if args.output_dir is None:
         # Obtain the model name from the args
+        cond_object = args.cond_image_path.split("/")[-1].split(".")[0]
         model_name = args.model_name
-        output_dir = f"results/{model_name}/random_noise/{prompt[:100]}"
+        output_dir = f"results/{model_name}/random_noise/{prompt[:100]}/condition{cond_object}"
         if args.eta != 1.0:
             output_dir += f"/eta{args.eta}"
 
@@ -32,6 +39,7 @@ def set_directory(args, prompt):
 
     else:
         output_dir = args.output_dir
+    
 
     latents_dir = f"results/{model_name}/latents/{args.num_inference_steps}steps/{prompt[:100]}/eta{args.eta}"
 
@@ -59,7 +67,7 @@ def main(args):
     transformer = CogVideoXTransformer3DModel.from_pretrained(model_id, subfolder="transformer", torch_dtype=torch.float16)
     text_encoder = T5EncoderModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.float16)
     vae = AutoencoderKLCogVideoX.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float16)
-    cog_image_pipeline = CogVideoFIFOPipeline.from_pretrained(
+    cog_image_pipeline = CogVideoOriginalPipeline.from_pretrained(
         model_id, 
         text_encoder=text_encoder,
         transformer=transformer,
@@ -92,28 +100,10 @@ def main(args):
 
         batch_size = 1
         # Prepare prompts and fps
-        
-        fps = torch.tensor([args.fps] * batch_size).to("cuda").long()
-
-        # Encode the prompts into embeddings
-        # Encode the prompts into embeddings
-        # positive_embeds, negative_embeds = cog_text_pipeline.encode_prompt(
-        #     prompt,  # Pass the text prompt
-        #     device="cuda",
-        #     do_classifier_free_guidance=True,
-        #     num_videos_per_prompt=1,
-        # )
-
-        # # Use only the positive embeddings for conditioning
-        # cond = {
-        #     "prompts": torch.cat((negative_embeds, positive_embeds), dim=0),# [positive_embeds],  # Use the positive embeddings
-        #     "fps": fps                    # Frame rate
-        # }
-        # Check if base video exists
         base_video_path = os.path.join(latents_dir, f"{args.num_inference_steps}.pt")
         base_output_path = os.path.join(output_dir, "base_video.mp4")
         is_run_base = not (os.path.exists(base_video_path) and os.path.exists(base_output_path))
-
+        ## Generate base video
         if is_run_base:
             print("Generating base video...")
             base_frames = cog_text_pipeline(prompt=prompt, guidance_scale=6, use_dynamic_cfg=True, num_inference_steps=args.num_inference_steps).frames[0]
@@ -140,30 +130,65 @@ def main(args):
             os.makedirs(latents_dir, exist_ok=True)
             torch.save(base_tensor, base_video_path)
             print(f"Base video tensor saved at: {base_video_path}")
-        # Load the base video latents for further processing
-        # video_frames = fifo_sampling_cogvideo(
-        #     args, cog_image_pipeline, cond, cfg_scale=args.unconditional_guidance_scale, 
-        #     output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames
-        # )
-        image = base_frames[-1]
-        breakpoint()
-        video_frames = cog_image_pipeline(image=base_frames, prompt=prompt, guidance_scale=6, use_dynamic_cfg=True, num_inference_steps=args.num_inference_steps)
-        breakpoint()
+            
+        # Generate video from base video using FIFO + CogVideoX-5b
+        video = torch.load(latents_dir + f"/{args.num_inference_steps}.pt")
+        print(f"Loaded video latents with shape: {video.shape}")  # torch.Size([3, 480, 49, 720])
+        last_frame = video[:, :, -1, :].unsqueeze(0)
+        print(f"Last frame shape: {last_frame.shape}")
+        image = last_frame
+        if args.cond_image_path is not None:
+            # Load and process conditioning image
+            cond_image = Image.open(args.cond_image_path)
+            # Define the image transforms
+            image_transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                std=[0.229, 0.224, 0.225]),
+            ])
+            # Load the pre-trained model and image processor
+            dinov2_vitg14 = torch.hub.load("facebookresearch/dinov2", 'dinov2_vitg14')
+            dinov2_vitg14.eval()  # Set to evaluation mode
+            dinov2_vitg14 = dinov2_vitg14.to("cuda").to(torch.float16)  # Move to GPU and convert to float16
+
+            cond_image = image_transform(cond_image).unsqueeze(0).to("cuda").to(torch.float16)  # Add batch dimension
+            features = dinov2_vitg14(cond_image, return_patches=True)[0].to("cpu")
+            video_frames = cog_image_pipeline(
+                image=image, 
+                prompt=prompt, 
+                guidance_scale=6, 
+                use_dynamic_cfg=True, 
+                num_inference_steps=args.num_inference_steps,
+                target_object=args.target_object,
+                cond_latents=features if args.cond_image_path else None,
+            ).frames[0]
+        else:
+            video_frames = cog_image_pipeline(
+                image=image, 
+                prompt=prompt, 
+                guidance_scale=6, 
+                use_dynamic_cfg=True, 
+                num_inference_steps=args.num_inference_steps,
+                target_object=args.target_object,
+                dino_model=dinov2_vitg14,
+            ).frames[0]
         output_path = os.path.join(output_dir, "fifo_video.mp4")
-        export_to_video(np.concatenate(video_frames), output_path, fps=args.output_fps)
+        export_to_video(video_frames, output_path, fps=args.output_fps)
 
 if __name__ == "__main__":
     parser = ArgumentParser()
 
     # Essential Model and Configuration Arguments
     parser.add_argument("--model_name", type=str, default="Cogvideox-5B", help="Model name")
-    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/test_prompts.txt", help="Path to the prompt file")
+    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/prompts22.txt", help="Path to the prompt file")
     
     # Video Generation Parameters
     parser.add_argument("--video_length", type=int, default=16, help="Length of the video in frames")
     parser.add_argument("--new_video_length", "-l", type=int, default=100, help="Desired output video length")
-    parser.add_argument("--height", type=int, default=320, help="Height of the output video")
-    parser.add_argument("--width", type=int, default=512, help="Width of the output video")
+    parser.add_argument("--height", type=int, default=480, help="Height of the output video")
+    parser.add_argument("--width", type=int, default=720, help="Width of the output video")
     parser.add_argument("--fps", type=int, default=8, help="Frames per second for the output video")
     parser.add_argument("--output_dir", type=str, default=None, help="Custom output directory")
 
@@ -181,6 +206,10 @@ if __name__ == "__main__":
     # Miscellaneous
     parser.add_argument("--eta", "-e", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=321, help="Random seed for reproducibility")
+
+    # New argument for target object
+    parser.add_argument("--target_object", type=str, default="dog.", help="Target object for Grounded SAM2 masking")
+    parser.add_argument("--cond_image_path", type=str, default="cat.png", help="Path to the conditioning image")
 
     args = parser.parse_args()
 

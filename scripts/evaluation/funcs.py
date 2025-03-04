@@ -25,19 +25,11 @@ def load_images_as_tensor(image_dir, image_size=(256,256), model=None):
     ])
 
     videos = []
-    ## Input Continous Frames 
-    # for img_path in glob.glob(image_dir + "/*.png"):
-    #     img = Image.open(img_path).convert("RGB")
-    #     img_tensor = transform(img)
-    #     videos.append(img_tensor)
-
     ## Input Single Frame
     image = Image.open(f"{image_dir}/cake.png").convert("RGB")
     image_tensor = transform(image).unsqueeze(1)
     videos = repeat(image_tensor, 'c t h w -> c (repeat t) h w', repeat=16)
     print(f"The video shape is: {videos.shape}")
-    
-    
     if isinstance(videos, list):
         videos = torch.stack(videos, dim=0).to("cuda")
         videos = videos.permute(1, 0, 2, 3)
@@ -58,11 +50,6 @@ def load_images_as_tensor(image_dir, image_size=(256,256), model=None):
 def prepare_latents(args, latents_dir, sampler, model=None):
     latents_list = []
 
-    # video = load_images_as_tensor("tests", (320, 512), model) 
-    # video = load_image_batch(get_filelist("./tests"), (40, 64))
-    # video = video.to("cuda")
-    # video = video.permute(1, 0, 2, 3)
-    # video = video.unsqueeze(0)
     video = torch.load(latents_dir+f"/{args.num_inference_steps}.pt")
     print("The shape of the video is: ", video.shape)
   
@@ -96,14 +83,7 @@ def prepare_latents(args, latents_dir, sampler, model=None):
 
 
 def shift_latents(latents):
-    ##### With out FreeInit #####
-    # shift latents
-    # latents[:,:,:-1] = latents[:,:,1:].clone()
-
-    # # add new noise to the last frame
-    # latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
-
-    ###### With FreeInit ######
+    ## Use FreeInit to shift the latents with more context on the anchor frame
     anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
     
     latents[:, :, :-1] = latents[:, :, 1:].clone()
@@ -232,9 +212,23 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
     return batch_images, ddim_sampler, samples
 
 def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
-                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, **kwargs):
+                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, targets=None, **kwargs):
     batch_size = noise_shape[0]
     kwargs.update({"clean_cond": True})
+
+    ## Obtain the conditioning image
+    transform = transforms.Compose([
+        transforms.Resize((args.height//8, args.width//8)),
+        transforms.CenterCrop((args.height//8, args.width//8)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    ])
+    cond_image = Image.open(args.cond_image_path).convert("RGB")
+    cond_image = transform(cond_image).unsqueeze(1).unsqueeze(0)
+    cond_image = cond_image.to("cuda")
+
+    ## Obtain the target
+    target = targets ## Input it into the sampling process
 
     # check condition bs
     if conditioning is not None:
@@ -275,7 +269,6 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
 
     timesteps = ddim_sampler.ddim_timesteps
     indices = np.arange(args.num_inference_steps) 
-
     if args.lookahead_denoising:
         timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps]) 
         indices = np.concatenate([np.full((args.video_length//2,), 0), indices]) 
@@ -297,6 +290,8 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                                             indices=idx,
                                             unconditional_guidance_scale=cfg_scale,
                                             unconditional_conditioning=uc,
+                                            cond_image=cond_image,
+                                            target=target,
                                             **kwargs
                                             )
             if args.lookahead_denoising:
@@ -457,9 +452,11 @@ def load_prompts(prompt_file):
     f = open(prompt_file, 'r')
     prompt_list = []
     for idx, line in enumerate(f.readlines()):
-        l = line.strip()
+        l = line.split(".")
+        prompt = l[0].strip()
+        target = l[1].strip()+"."
         if len(l) != 0:
-            prompt_list.append(l)
+            prompt_list.append((prompt, target))
         f.close()
     return prompt_list
 

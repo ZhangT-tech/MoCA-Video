@@ -5,9 +5,14 @@ import torch
 import numpy as np
 from PIL import Image
 import imageio
-
+import warnings
+warnings.filterwarnings("ignore")
 from pytorch_lightning import seed_everything
-
+import logging
+logging.getLogger().setLevel(logging.ERROR)  # Only show ERROR messages
+logging.disable(logging.INFO)
+logging.disable(logging.DEBUG)
+logging.disable(logging.WARNING)
 from scripts.evaluation.funcs import load_model_checkpoint, load_prompts, load_image_batch, get_filelist, save_gif
 from scripts.evaluation.funcs import base_ddim_sampling, fifo_ddim_sampling
 from utils.utils import instantiate_from_config
@@ -79,9 +84,9 @@ def main(args):
         batch_size = 1
         noise_shape = [batch_size, channels, frames, h, w]
         fps = torch.tensor([args.fps]*batch_size).to(model.device).long()
-
-        prompts = [prompt]
-        text_emb = model.get_learned_conditioning(prompts)
+        prompts = [prompt[0]]
+        targets = prompt[1]
+        text_emb = model.get_learned_conditioning(prompts) # torch.Size([1, 77, 1024])
 
         cond = {"c_crossattn": [text_emb], "fps": fps}
 
@@ -95,9 +100,10 @@ def main(args):
                                                 args.num_inference_steps, args.eta, args.unconditional_guidance_scale, \
                                                 latents_dir=latents_dir)
             save_gif(base_tensor, output_dir, "origin")
-
+        if args.cond_prompt:
+            cond["c_crossattn"].append(model.get_learned_conditioning([args.cond_prompt]))
         video_frames = fifo_ddim_sampling(
-            args, model, cond, noise_shape, ddim_sampler, args.unconditional_guidance_scale, output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames
+            args, model, cond, noise_shape, ddim_sampler, args.unconditional_guidance_scale, output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames, targets=targets
         )
         if args.output_dir is None:
             output_path = output_dir+"/fifo"
@@ -105,9 +111,9 @@ def main(args):
             output_path = output_dir+f"/{prompt[:100]}"
 
         if args.use_mp4:
-            imageio.mimsave(output_path+".mp4", video_frames[-args.new_video_length:], fps=args.output_fps)
+            imageio.mimsave(output_path+".mp4", video_frames[-args.new_video_length//2:], fps=args.output_fps)
         else:
-            imageio.mimsave(output_path+".gif", video_frames[-args.new_video_length:], duration=int(1000/args.output_fps)) 
+            imageio.mimsave(output_path+".gif", video_frames[-args.new_video_length//2:], duration=int(1000/args.output_fps)) 
 
 
 if __name__ == "__main__":
@@ -118,7 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--video_length", type=int, default=16, help="f in paper")
     parser.add_argument("--num_partitions", "-n", type=int, default=4, help="n in paper")
     parser.add_argument("--num_inference_steps", type=int, default=16, help="number of inference steps, it will be f * n forcedly")
-    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/test_prompts.txt", help="path to the prompt file")
+    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/prompts01.txt", help="path to the prompt file")
     parser.add_argument("--new_video_length", "-l", type=int, default=100, help="N in paper; desired length of the output video")
     parser.add_argument("--num_processes", type=int, default=1, help="number of processes if you want to run only the subset of the prompts")
     parser.add_argument("--rank", type=int, default=0, help="rank of the process(0~num_processes-1)")
@@ -130,8 +136,11 @@ if __name__ == "__main__":
     parser.add_argument("--lookahead_denoising", "-ld", action="store_false", default=True)
     parser.add_argument("--eta", "-e", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default=None, help="custom output directory")
-    parser.add_argument("--use_mp4", action="store_true", default=False, help="use mp4 format for the output video")
+    parser.add_argument("--use_mp4", action="store_true", default=True, help="use mp4 format for the output video")
     parser.add_argument("--output_fps", type=int, default=10, help="fps of the output video")
+    ## ADD New Arguments: Condition on the image
+    parser.add_argument("--cond_image_path", type=str, default="cat.png", help="path to the conditioning image")
+    parser.add_argument("--cond_prompt", type=str, default="The condition image is a cat.", help="conditional prompt")
 
     args = parser.parse_args()
 
