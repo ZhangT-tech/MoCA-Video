@@ -13,15 +13,20 @@ logging.getLogger().setLevel(logging.ERROR)  # Only show ERROR messages
 logging.disable(logging.INFO)
 logging.disable(logging.DEBUG)
 logging.disable(logging.WARNING)
-from scripts.evaluation.funcs import load_model_checkpoint, load_prompts, load_image_batch, get_filelist, save_gif
+from scripts.evaluation.funcs import load_model_checkpoint, load_prompts,save_gif, save_videos, load_davis_data
 from scripts.evaluation.funcs import base_ddim_sampling, fifo_ddim_sampling
 from utils.utils import instantiate_from_config
 from lvdm.models.samplers.ddim import DDIMSampler
+from torch.nn import functional as F
+
 
 
 def set_directory(args, prompt):
     if args.output_dir is None:
-        output_dir = f"results/videocraft_v2_fifo/random_noise/{prompt[:100]}"
+        if args.use_self_attention:
+            output_dir = f"results/videocraft_v2_fifo/random_noise/self_attention/{prompt[:100]}"
+        else:
+            output_dir = f"results/videocraft_v2_fifo/random_noise/sam2/{prompt[:100]}"
         if args.eta != 1.0:
             output_dir += f"/eta{args.eta}"
 
@@ -36,8 +41,10 @@ def set_directory(args, prompt):
 
     else:
         output_dir = args.output_dir
-
-    latents_dir = f"results/videocraft_v2_fifo/latents/{args.num_inference_steps}steps/{prompt[:100]}/eta{args.eta}"
+    if args.use_davis:
+        latents_dir = f"visualizations/davis_data/{args.video_name}"
+    else:
+        latents_dir = f"results/videocraft_v2_fifo/latents/{args.num_inference_steps}steps/{prompt[:100]}/eta{args.eta}"
 
     print("The results will be saved in", output_dir)
     print("The latents will be saved in", latents_dir)
@@ -51,7 +58,6 @@ def main(args):
     ## step 1: model config
     ## -----------------------------------------------------------------
     config = OmegaConf.load(args.config)
-    #data_config = config.pop("data", OmegaConf.create())
     model_config = config.pop("model", OmegaConf.create())
     model = instantiate_from_config(model_config)
     model = model.cuda()
@@ -62,58 +68,136 @@ def main(args):
     ## sample shape
     assert (args.height % 16 == 0) and (args.width % 16 == 0), "Error: image size [h,w] should be multiples of 16!"
     ## latent noise shape
-    h, w = args.height // 8, args.width // 8
+    latent_height = args.height // 8
+    latent_width = args.width // 8
     frames = args.video_length
     channels = model.channels
 
+    # Use assets/cats.png as conditioning image
+    conditioned_image_path = "assets/cats.png"
+    print(f"The conditioning image is {conditioned_image_path}")
+
     ## step 2: load data
     ## -----------------------------------------------------------------
-    assert os.path.exists(args.prompt_file), "Error: prompt file NOT Found!"
-    prompt_list = load_prompts(args.prompt_file)
-    num_samples = len(prompt_list)
+    if args.use_davis:
+        assert os.path.exists(args.davis_root), f"Error: DAVIS dataset root [{args.davis_root}] Not Found!"
+        assert args.video_name is not None, "Error: video_name must be specified when using DAVIS dataset!"
+        assert args.sampling_strategy in ["first", "random", "uniform"], "Error: sampling_strategy must be one of: first, random, uniform"
+        
+        # Load DAVIS data
+        davis_data = load_davis_data(
+            args.video_name,
+            args.davis_root,
+            frame_stride=args.frame_stride,
+            video_size=(latent_height, latent_width),
+            video_frames=72,#args.video_length,
+            sampling_strategy="first"#args.sampling_strategy
+        )
 
-    indices = list(range(num_samples))
-    indices = indices[args.rank::args.num_processes]
+        targets = args.video_name + "."  # Use video name as target with period
+        print(f"The targets are {targets}")
 
-    ## step 3: run over samples
-    ## -----------------------------------------------------------------
-    for idx in indices:
-        prompt = prompt_list[idx]
-        output_dir, latents_dir = set_directory(args, prompt)
-
+        # Process single DAVIS video
+        output_dir, latents_dir = set_directory(args, args.video_name)
+        
         batch_size = 1
-        noise_shape = [batch_size, channels, frames, h, w]
+        noise_shape = [batch_size, channels, frames, latent_height, latent_width]
         fps = torch.tensor([args.fps]*batch_size).to(model.device).long()
-        prompts = [prompt[0]]
-        targets = prompt[1]
-        text_emb = model.get_learned_conditioning(prompts) # torch.Size([1, 77, 1024])
-
+        
+        # Use z conditioned object as the prompt
+        prompt = "cat."
+        text_emb = model.get_learned_conditioning([prompt])
         cond = {"c_crossattn": [text_emb], "fps": fps}
 
-        ## inference
-        is_run_base = not (os.path.exists(latents_dir+f"/{args.num_inference_steps}.pt") and os.path.exists(latents_dir+f"/0.pt"))
-        if not is_run_base:
-            ddim_sampler = DDIMSampler(model)
-            ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
-        else:
-            base_tensor, ddim_sampler, _ = base_ddim_sampling(model, cond, noise_shape, \
-                                                args.num_inference_steps, args.eta, args.unconditional_guidance_scale, \
-                                                latents_dir=latents_dir)
-            save_gif(base_tensor, output_dir, "origin")
-        if args.cond_prompt:
-            cond["c_crossattn"].append(model.get_learned_conditioning([args.cond_prompt]))
+        # Initialize DDIM sampler
+        ddim_sampler = DDIMSampler(model)
+        ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
+
+        # Convert DAVIS frames to latents and save them
+        frames, masks = davis_data
+        frames = frames.to(model.device)
+
         video_frames = fifo_ddim_sampling(
-            args, model, cond, noise_shape, ddim_sampler, args.unconditional_guidance_scale, output_dir=output_dir, latents_dir=latents_dir, save_frames=args.save_frames, targets=targets
+            args, model, cond, noise_shape, ddim_sampler, 
+            args.unconditional_guidance_scale, 
+            output_dir=output_dir, 
+            latents_dir=latents_dir, 
+            save_frames=args.save_frames, 
+            conditioned_image_path=conditioned_image_path, 
+            targets=targets, 
+            gamma=args.gamma,
+            use_self_attention=args.use_self_attention,
+            davis_data=davis_data, 
         )
+
         if args.output_dir is None:
             output_path = output_dir+"/fifo"
         else:
-            output_path = output_dir+f"/{prompt[:100]}"
+            output_path = output_dir+f"/{args.video_name}"
 
         if args.use_mp4:
-            imageio.mimsave(output_path+".mp4", video_frames[-args.new_video_length//2:], fps=args.output_fps)
+            imageio.mimsave(output_path+".mp4", video_frames[:], fps=args.output_fps)
         else:
-            imageio.mimsave(output_path+".gif", video_frames[-args.new_video_length//2:], duration=int(1000/args.output_fps)) 
+            imageio.mimsave(output_path+".gif", video_frames[-args.new_video_length//2:], duration=int(1000/args.output_fps))
+    else:
+        # Original prompt-based processing
+        assert os.path.exists(args.prompt_file), "Error: prompt file NOT Found!"
+        prompt_list = load_prompts(args.prompt_file, args.prompt_index)
+        num_samples = len(prompt_list)
+        indices = list(range(num_samples))
+        indices = indices[args.rank::args.num_processes]
+        
+        for idx in indices:
+            data = prompt_list[idx]
+            prompt = data["prompt"]
+            conditioned_object = data["conditioned_object"]
+            conditioned_image_path = data["conditioned_image_path"]
+            conditioned_prompt = data["conditioned_prompt"]
+            gamma = data["gamma"]
+
+            output_dir, latents_dir = set_directory(args, prompt)
+
+            batch_size = 1
+            noise_shape = [batch_size, channels, frames, latent_height, latent_width]
+            fps = torch.tensor([args.fps]*batch_size).to(model.device).long()
+            prompts = [prompt]
+            targets = conditioned_object + "."
+            text_emb = model.get_learned_conditioning(prompts)
+            cond = {"c_crossattn": [text_emb], "fps": fps}
+
+            ## inference
+            is_run_base = not (os.path.exists(latents_dir+f"/{args.num_inference_steps}.pt") and os.path.exists(latents_dir+f"/0.pt"))
+            if not is_run_base:
+                ddim_sampler = DDIMSampler(model)
+                ddim_sampler.make_schedule(ddim_num_steps=args.num_inference_steps, ddim_eta=args.eta, verbose=False)
+            else:
+                base_tensor, ddim_sampler, _ = base_ddim_sampling(model, cond, noise_shape, \
+                                                    args.num_inference_steps, args.eta, args.unconditional_guidance_scale, \
+                                                    latents_dir=latents_dir)
+                save_gif(base_tensor, output_dir, "origin")
+            if conditioned_prompt:
+                cond["c_crossattn"].append(model.get_learned_conditioning([conditioned_prompt]))
+            video_frames = fifo_ddim_sampling(
+                args, model, cond, noise_shape, ddim_sampler, 
+                args.unconditional_guidance_scale, 
+                output_dir=output_dir, 
+                latents_dir=latents_dir, 
+                save_frames=args.save_frames, 
+                conditioned_image_path=conditioned_image_path, 
+                targets=targets, 
+                gamma=gamma,
+                use_self_attention=args.use_self_attention
+
+            )
+            if args.output_dir is None:
+                output_path = output_dir+"/fifo"
+            else:
+                output_path = output_dir+f"/{prompt[:100]}"
+
+            if args.use_mp4:
+                imageio.mimsave(output_path+".mp4", video_frames[-args.new_video_length//2:], fps=args.output_fps) # 
+            else:
+                imageio.mimsave(output_path+".gif", video_frames[-args.new_video_length//2:], duration=int(1000/args.output_fps)) # 
 
 
 if __name__ == "__main__":
@@ -124,24 +208,33 @@ if __name__ == "__main__":
     parser.add_argument("--video_length", type=int, default=16, help="f in paper")
     parser.add_argument("--num_partitions", "-n", type=int, default=4, help="n in paper")
     parser.add_argument("--num_inference_steps", type=int, default=16, help="number of inference steps, it will be f * n forcedly")
-    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/prompts01.txt", help="path to the prompt file")
+    parser.add_argument("--prompt_file", "-p", type=str, default="prompts/prompts.csv", help="path to the prompt file")
     parser.add_argument("--new_video_length", "-l", type=int, default=100, help="N in paper; desired length of the output video")
     parser.add_argument("--num_processes", type=int, default=1, help="number of processes if you want to run only the subset of the prompts")
     parser.add_argument("--rank", type=int, default=0, help="rank of the process(0~num_processes-1)")
     parser.add_argument("--height", type=int, default=320, help="height of the output video")
     parser.add_argument("--width", type=int, default=512, help="width of the output video")
-    parser.add_argument("--save_frames", action="store_true", default=False, help="save generated frames for each step")
+    parser.add_argument("--save_frames", action="store_true", default=True, help="save generated frames for each step")
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--unconditional_guidance_scale", type=float, default=12.0, help="prompt classifier-free guidance")
-    parser.add_argument("--lookahead_denoising", "-ld", action="store_false", default=True)
+    parser.add_argument("--lookahead_denoising", "-ld", action="store_true", default=False)
     parser.add_argument("--eta", "-e", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default=None, help="custom output directory")
     parser.add_argument("--use_mp4", action="store_true", default=True, help="use mp4 format for the output video")
     parser.add_argument("--output_fps", type=int, default=10, help="fps of the output video")
-    ## ADD New Arguments: Condition on the image
-    parser.add_argument("--cond_image_path", type=str, default="cat.png", help="path to the conditioning image")
-    parser.add_argument("--cond_prompt", type=str, default="The condition image is a cat.", help="conditional prompt")
+    parser.add_argument("--prompt_index", type=int, default=None, help="index of the prompt to run")
+    parser.add_argument("--use_self_attention", type=bool, default=False, help="Use self-attention instead of segmentation for feature injection")
+    
+    # Add DAVIS dataset arguments
+    parser.add_argument("--use_davis", action="store_true", default=False, help="Use DAVIS dataset instead of prompts")
+    parser.add_argument("--davis_root", type=str, default="DAVIS", help="Root directory of DAVIS dataset")
+    parser.add_argument("--video_name", type=str, default=None, help="Name of the video sequence in DAVIS dataset")
+    parser.add_argument("--frame_stride", type=int, default=1, help="Stride for frame sampling in DAVIS dataset")
+    parser.add_argument("--gamma", type=float, default=0.5, help="Gamma value for feature injection")
+    parser.add_argument("--sampling_strategy", type=str, default="uniform", choices=["first", "random", "uniform"], 
+                      help="Strategy for selecting frames from DAVIS dataset")
 
+    
     args = parser.parse_args()
 
     args.num_inference_steps = args.video_length * args.num_partitions

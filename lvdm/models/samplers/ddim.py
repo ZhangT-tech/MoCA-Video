@@ -17,42 +17,36 @@ logging.disable(logging.WARNING)
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from PIL import Image
+import math
+import torch.nn as nn
+from .visualization import VisualizationHelper
 
 class DDIMSampler(object):
     """
     Perform DDIM sampling using a diffusion model.
     """
-    def __init__(self, model, schedule="linear", **kwargs):
+    def __init__(self, model, schedule="linear", use_self_attention=False, **kwargs):
         super().__init__()
         self.model = model # DDIM model
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule 
         self.counter = 0
+        self.use_self_attention = use_self_attention
+        self.vis_helper = VisualizationHelper()
         
-        # Initialize SAM2 and Grounding DINO once
-        grounded_sam_path = self.setup_grounded_sam_paths()
-        sam2_checkpoint = os.path.join(grounded_sam_path, 'checkpoints/sam2.1_hiera_large.pt')
+        # Initialize models only if needed
+        self.sam2_model = None
+        self.sam2_predictor = None
+        self.processor = None
+        self.grounding_model = None
         
-        if not os.path.exists(sam2_checkpoint):
-            raise RuntimeError(f"SAM2 checkpoint not found at {sam2_checkpoint}")
+        # Flag to control model initialization
+        self.models_initialized = False
         
-        # Initialize SAM2
-        self.sam2_model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', sam2_checkpoint, device="cuda")
-        self.sam2_predictor = SAM2ImagePredictor(self.sam2_model)
-        
-        # Initialize Grounding DINO
-        grounding_model_id = "IDEA-Research/grounding-dino-tiny"
-        self.processor = AutoProcessor.from_pretrained(grounding_model_id)
-        self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            grounding_model_id,
-            torch_dtype=torch.float16
-        ).to("cuda").half()
-
-        # Initialize DINO model
-        self.dino_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
-        self.dino_model = self.dino_model.to("cuda").to(torch.float16)
-        self.dino_model.eval()
-
+        # Initialize models based on self-attention flag
+        if not use_self_attention:
+            self.initialize_segmentation_models()
+            
 
     def register_buffer(self, name, attr):
         """
@@ -258,9 +252,8 @@ class DDIMSampler(object):
     @torch.no_grad()
     def fifo_onestep(self, cond, shape, latents=None, timesteps=None, indices=None,
                      unconditional_guidance_scale=1., unconditional_conditioning=None, 
-                     cond_image=None, target=None,
-                     **kwargs):
-
+                     cond_image=None, target=None, use_self_attention=False,
+                     davis_masks=None, no_sam=False, **kwargs):
         device = self.model.betas.device        
         b, _, f, _, _ = shape
         ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long) # [16]
@@ -269,7 +262,9 @@ class DDIMSampler(object):
                                 unconditional_conditioning=unconditional_conditioning,
                                 **kwargs) # torch.Size([1, 4, 16, 40, 64])
         
-        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts)
+        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts, 
+                                        use_self_attention=use_self_attention,
+                                        davis_masks=davis_masks, no_sam=no_sam)
 
         return latents, pred_x0
 
@@ -377,7 +372,8 @@ class DDIMSampler(object):
         return e_t
 
     @torch.no_grad()
-    def ddim_step(self, sample, noise_pred, indices, cond_image, target, ts):
+    def ddim_step(self, sample, noise_pred, indices, cond_image, target, ts, gamma=0.5, use_self_attention=False, davis_masks=None, no_sam=False):
+        """Modified DDIM step to support both attention mechanisms and DAVIS masks"""
         b, _, f, *_, device = *sample.shape, sample.device
 
         alphas = self.ddim_alphas
@@ -391,7 +387,8 @@ class DDIMSampler(object):
         pred_x0s = []
 
         pre_masks = None
-        
+
+
         # Initialize momentum if not already done
         if not hasattr(self, 'momentum'):
             self.momentum = torch.zeros_like(sample)
@@ -399,6 +396,12 @@ class DDIMSampler(object):
             
         # Store previous frame for gradient calculation
         prev_frame = None
+
+        # Create visualization directory if it doesn't exist
+        vis_dir = "visualizations/denoising"
+        os.makedirs(vis_dir, exist_ok=True)
+        cond_dir = "visualizations/conditioning"
+        os.makedirs(cond_dir, exist_ok=True)
 
         for i, index in enumerate(indices):
             x = sample[:, :, [i]]
@@ -417,43 +420,79 @@ class DDIMSampler(object):
             
             # Calculate motion gradient if we have a previous frame
             if prev_frame is not None:
-                # Calculate frame difference as a simple gradient
                 motion_gradient = pred_x0 - prev_frame
-                
-                # Incorporate dir_xt into the gradient calculation
-                # This helps align the motion with the diffusion direction
                 motion_gradient = motion_gradient + 0.05 * dir_xt
-                
-                # Update momentum using the equation: v_t = β * v_{t-1} + (1-β) * gradient
                 self.momentum[:, :, [i]] = (
                     self.beta * self.momentum[:, :, [i-1]] + 
                     (1 - self.beta) * motion_gradient
                 )
-                
-                # Apply motion correction with adaptive strength based on timestep
-                correction_strength = 0.1 * (1.0 - timestep / 1000.0)  # Stronger correction at later timesteps
+                correction_strength = 0.1 * (1.0 - timestep / 1000.0)
                 pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
             
-            # Store current frame for next iteration
             prev_frame = pred_x0.detach()
             
             noise = sigma_t * noise_like(x.shape, device)
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
             
-            ## Apply the cond_img to the predicted x_0
+            # Apply conditioning using either DAVIS masks or attention/segmentation
             if timestep <= 300:
-                pred_x0, masks = self.apply_cond_img(pred_x0, cond_image, target, i, pre_masks) # torch.Size([1, 4, 1, 40, 64])
-                pre_masks = masks
-                gamma = 0.5
-                pred_x0 = pred_x0 + gamma * noise
-            
+                if davis_masks is not None:
+                    # Use DAVIS mask directly
+                    mask = davis_masks[:, :, i, :, :]  # [H, W]
+                    mask = mask.unsqueeze(0)  # [1, 1, H, W]
+                    # Check if mask has any values of 1
+                    print(f"Mask shape: {mask.shape}")
+                    print(f"Mask min: {mask.min()}, max: {mask.max()}")
+                    print(f"Number of 1s in mask: {(mask > 0.5).sum().item()}")
+                  
+                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)  # [1, C, 1, 32, 32]
+                    
+                    # Apply the cond_image to the masked pred_x0 region
+                    if cond_image is None:
+                        cond_image = torch.zeros_like(pred_x0[:, :, 0])
+                    elif cond_image.shape[1] != pred_x0.shape[1]:
+                        if cond_image.shape[1] == 3:
+                            alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
+                            cond_image = torch.cat([cond_image, alpha_channel], dim=1)
+                        else:
+                            raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
+                    
+                    # Apply enhancement factor
+                    enhancement_factor = 1
+                    
+                    # Apply the mask with the properly sized conditioning image
+                    if mask.sum() != 0:
+                        pred_x0 = torch.where(
+                            mask.to(pred_x0.device) > 0.5,
+                            cond_image * enhancement_factor,
+                            pred_x0
+                        )   
+                else:
+                    # Use original attention/segmentation approach
+                    print("Using sam approach")
+                    pred_x0, attention = self.apply_cond_img(
+                        pred_x0, 
+                        cond_image, 
+                        target, 
+                        i, 
+                        pre_masks if not use_self_attention else getattr(self, 'previous_attention', None),
+                        use_self_attention=use_self_attention
+                    )
+                    
+                    if use_self_attention:
+                        self.previous_attention = attention
+                    else:
+                        pre_masks = attention
+                    
+                pred_x0 = (1-gamma) * pred_x0 + gamma * noise
+
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
 
         x_prev = torch.cat(x_prevs, dim=2)
         pred_x0 = torch.cat(pred_x0s, dim=2)
 
-        return x_prev, pred_x0 # torch.Size([1, 4, 16, 40, 64])
+        return x_prev, pred_x0
 
     @torch.no_grad()
     def stochastic_encode(self, x0, t, use_original_steps=False, noise=None):
@@ -499,42 +538,23 @@ class DDIMSampler(object):
         return x_dec
 
     def visualize_sampling(self, pred_x0, noise, save_dir, step, is_manipulated=False):
-        """Visualize the sampling process
-        
-        Args:
-            x_prev (torch.Tensor): Noisy sample for next step [B,C,T,H,W]
-            pred_x0 (torch.Tensor): Predicted denoised image [B,C,T,H,W]
-            noise (torch.Tensor): Added noise [B,C,T,H,W]
-            save_dir (str): Directory to save visualizations
-            step (int): Current sampling step
-            is_manipulated (bool): Whether pred_x0 has been manipulated
-        """
-        # Create step subfolder with manipulation status
-        status = "after_manipulation" if is_manipulated else "before_manipulation"
-        step_dir = os.path.join(save_dir, f'step_{step:03d}_{status}')
-        os.makedirs(step_dir, exist_ok=True)
-        
-        # Function to process tensor for visualization
-        def process_for_vis(tensor):
-            # Move to CPU, take first batch and normalize to [0,1]
-            vis = tensor[0].detach().cpu()  # Remove batch dim
-            vis = (vis - vis.min()) / (vis.max() - vis.min())  # Normalize
-            return vis
+        """Visualize the sampling process"""
+        self.vis_helper.visualize_sampling(pred_x0, noise, save_dir, step, is_manipulated)
 
-        # Save each frame
-        
-        grid = torch.stack([
-            process_for_vis(pred_x0[:,:,0]),
-            process_for_vis(noise[:,:,0])
-        ])
-        
-        # Save grid in step subfolder
-        torchvision.utils.save_image(
-            grid,
-            os.path.join(step_dir, f'frame_{0:03d}.png'),
-            nrow=2,
-            normalize=False
+    def visualize_object_attention(self, pred_image, cond_image, attention_mask, attention_map, 
+                                 labeled_regions, target_object, save_dir, step):
+        """Visualize attention and region detection"""
+        self.vis_helper.visualize_object_attention(
+            pred_image, cond_image, attention_mask, attention_map,
+            labeled_regions, target_object, save_dir, step
         )
+    def visualize_mask_and_latent(self, mask, latent, timestep, frame_idx, save_dir):
+        """Visualize the mask and latent during denoising process"""
+        self.vis_helper.visualize_mask_and_latent(mask, latent, timestep, frame_idx, save_dir)
+
+    def visualize_masks(self, masks, save_dir, step):
+        """Visualize the segmentation masks"""
+        self.vis_helper.visualize_masks(masks, save_dir, step)
 
     def setup_grounded_sam_paths(self):
         """Setup paths for Grounded SAM2 modules"""
@@ -548,27 +568,31 @@ class DDIMSampler(object):
             sys.path.append(str(grounded_sam_path))
             
         return grounded_sam_path
-    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks):
-        """Apply conditioning image to predicted x0 using Grounded SAM
-        
-        Args:
-            pred_x0 (torch.Tensor): Predicted x0 image [B,C,T,H,W]
-            cond_image (torch.Tensor): Conditioning image to apply
-            target (str): Text prompt for segmentation
-            
-        Returns:
-            torch.Tensor: Modified pred_x0 with cond_image applied to segmented region
+    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks, use_self_attention=False):
         """
-        # Now use the pre-initialized models
+        Apply conditioning image using either segmentation or self-attention
+        Args:
+            pred_x0: predicted image
+            cond_image: conditioning image
+            target: text prompt for segmentation
+            step: current step
+            pre_masks: previous masks for temporal consistency
+            use_self_attention: whether to use self-attention instead of segmentation
+        """
+        return self._apply_segmentation(pred_x0, cond_image, target, step, pre_masks)
+
+
+    def _apply_segmentation(self, pred_x0, cond_image, target, step, pre_masks):
+        """Original segmentation-based approach"""
+        if not target.endswith("."):
+            target = target + "."
         # Convert tensor to PIL Image if needed
         if isinstance(pred_x0, torch.Tensor):
             image_np = pred_x0.cpu().numpy()
-            # Remove batch dimension if present
-        if len(image_np.shape) == 5:  # [B, C, F, H, W]
-            image_np = image_np.squeeze(2).squeeze(0)  # Now [C, F, H, W]
-        # Extract frame and convert to correct format [H, W, C]
+        if len(image_np.shape) == 5:
+            image_np = image_np.squeeze(2).squeeze(0)
         
-        frame = np.transpose(image_np, (1, 2, 0))  # Convert to [H, W, C]
+        frame = np.transpose(image_np, (1, 2, 0))
 
         if frame.shape[-1] != 3:
             if frame.shape[-1] == 1:
@@ -581,24 +605,19 @@ class DDIMSampler(object):
             frame = (frame * 255).astype(np.uint8)
         else:
             frame = frame.astype(np.uint8)
-            
+        
         frame_pil = Image.fromarray(frame)
         
-        # Process frame with SAM2
+        # Rest of original segmentation code...
         self.sam2_predictor.set_image(np.array(frame_pil.convert("RGB")))
         
-        # Get boxes from Grounding DINO
         inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
-        # Move inputs to device and convert float tensors to float16
-        inputs = {
-            k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else 
-                v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else 
-                v.to("cuda"))
-            for k, v in inputs.items() 
-            if isinstance(v, torch.Tensor)
-        }
-                    
-        # Ensure all float tensors are float16
+        inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else 
+                    v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else 
+                    v.to("cuda"))
+                for k, v in inputs.items() 
+                if isinstance(v, torch.Tensor)}
+        
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 outputs = self.grounding_model(**inputs)
@@ -632,16 +651,19 @@ class DDIMSampler(object):
                 iou = self.calculate_iou(masks, pre_masks)
                 if iou < 0.5:
                     masks = pre_masks
-            
-            # Convert masks to correct device and format
-            masks = torch.from_numpy(masks) # [N,H,W]
+
+            # Convert masks to tensor if they're numpy arrays
+            if isinstance(masks, np.ndarray):
+                masks = torch.from_numpy(masks).float()  # Ensure float first
+                
             
         # Create a copy of pred_x0 to modify
         modified_pred_x0 = pred_x0.clone()
 
         # For each mask in the batch
         for mask in masks:
-            if mask.sum() == mask.shape[0] * mask.shape[1]:
+            # if the mask majorly covers the image, use the original image
+            if mask.sum() > 0.8 * mask.numel():
                 modified_pred_x0 = pred_x0
                 continue
             # Expand mask to match channels
@@ -656,42 +678,28 @@ class DDIMSampler(object):
                 breakpoint()
 
             ## Apply the cond_image to the masked pred_x0 region
-            if cond_image.shape[1] != pred_x0.shape[1]:
+            if cond_image is None:
+                # Create a black conditional image matching pred_x0's dimensions
+                cond_image = torch.zeros_like(pred_x0[:, :, 0])  # Take first frame's dimensions
+            elif cond_image.shape[1] != pred_x0.shape[1]:
                 if cond_image.shape[1] == 3:
-                    #3 Add Alpha Channel
+                    # Add Alpha Channel
                     alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
                     cond_image = torch.cat([cond_image, alpha_channel], dim=1)
                 else:
-                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
-            
-            # More aggressive version
-            enhancement_factor = 1.2  # Boost the conditional image intensity
-
+                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")            
+          
+            # Apply enhancement factor
+            enhancement_factor = 2
+            # Apply the mask with the properly sized conditioning image
             modified_pred_x0 = torch.where(
                 mask.to(pred_x0.device) > 0.5,
-                cond_image * enhancement_factor,  # Boosted conditional image
+                cond_image * enhancement_factor,
                 modified_pred_x0
             )
-        return modified_pred_x0, masks
-
-    def visualize_masks(self, masks, save_dir, step):
-        """Visualize the segmentation masks"""
-
-        # Create masks subfolder in step directory
-        masks_dir = os.path.join(save_dir, f'step_{step:03d}_masks')
-        os.makedirs(masks_dir, exist_ok=True)
-        
-        # Convert masks to tensor if they're numpy arrays
-        if isinstance(masks, np.ndarray):
-            masks = torch.from_numpy(masks).float()  # Ensure float first
-        
-        # Process each mask
-        for i, mask in enumerate(masks):
-            # Convert to numpy, scale to [0, 255], and save directly as PIL Image
-            mask_np = (mask.cpu().numpy() * 255).astype(np.uint8)
-            mask_pil = Image.fromarray(mask_np)
-            mask_pil.save(os.path.join(masks_dir, f'mask_{i:03d}.png'))
             
+        return modified_pred_x0, masks
+    
     def calculate_iou(self, masks1, masks2):
         """Calculate Intersection over Union (IoU) between two sets of masks.
         
@@ -731,4 +739,93 @@ class DDIMSampler(object):
         
         # Return average IoU
         return torch.tensor(ious).mean().item()
+            
+    def initialize_segmentation_models(self):
+        """Initialize SAM2 and Grounding DINO for segmentation-based approach"""
+        if self.models_initialized:
+            return
+            
+        # Initialize SAM2 and Grounding DINO
+        grounded_sam_path = self.setup_grounded_sam_paths()
+        sam2_checkpoint = os.path.join(grounded_sam_path, 'checkpoints/sam2.1_hiera_large.pt')
+        
+        if not os.path.exists(sam2_checkpoint):
+            raise RuntimeError(f"SAM2 checkpoint not found at {sam2_checkpoint}")
+        
+        # Initialize SAM2
+        self.sam2_model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', sam2_checkpoint, device="cuda")
+        self.sam2_predictor = SAM2ImagePredictor(self.sam2_model)
+        
+        # Initialize Grounding DINO
+        grounding_model_id = "IDEA-Research/grounding-dino-tiny"
+        self.processor = AutoProcessor.from_pretrained(grounding_model_id)
+        self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            grounding_model_id,
+            torch_dtype=torch.float16
+        ).to("cuda").half()
+        
+        self.models_initialized = True
+            
+    @torch.no_grad()
+    def ddim_inversion(self, frames, num_inference_steps, eta=1.0, latents_dir=None):
+        """
+        Perform DDIM inversion on input frames to obtain initial latents.
+        
+        Args:
+            frames: Input frames tensor [B, C, T, H, W]
+            num_inference_steps: Number of inference steps
+            eta: DDIM eta parameter
+            latents_dir: Optional directory to save intermediate latents
+            
+        Returns:
+            latents: Inverted latents
+        """
+        # Ensure frames have correct dimensions
+        if frames.dim() != 5:
+            raise ValueError(f"Expected frames to have 5 dimensions [B, C, T, H, W], got {frames.dim()}")
+        
+        # Convert RGBA to RGB if needed
+        if frames.shape[1] == 4:  # RGBA
+            frames = frames[:, :3]  # Keep only RGB channels
+        
+        # Encode frames to latents
+        latents = self.model.encode_first_stage_2DAE(frames)  # [B, C, 16, H, W]
+        
+        # Ensure latents have correct dimensions [B, C, T, H, W]
+        if latents.dim() != 5:
+            raise ValueError(f"Expected latents to have 5 dimensions [B, C, T, H, W], got {latents.dim()}")
+        
+        # Ensure latents have 4 channels
+        if latents.shape[1] == 3:  # If encoder output has 3 channels
+            zeros = torch.zeros_like(latents[:, :1])  # [B, 1, T, H, W]
+            latents = torch.cat([latents, zeros], dim=1)  # [B, 4, T, H, W]
+        
+        # Initialize latents list
+        latents_list = []
+        
+        # Main DDIM inversion loop
+        for i in range(num_inference_steps):
+            alpha = self.ddim_alphas[i]
+            beta = 1 - alpha
+            
+            # Calculate frame index with proper offset
+            frame_idx = max(0, i - (num_inference_steps - frames.shape[2]))
+            
+            # Get current frame's latents
+            current_latents = latents[:,:,[frame_idx]]
+            
+            # Add noise with proper scaling
+            noise = torch.randn_like(current_latents)
+            new_latents = alpha**(0.5) * current_latents + beta**(0.5) * noise
+            
+            # Store intermediate results if needed
+            if latents_dir is not None:
+                torch.save(new_latents, f"{latents_dir}/step_{i}.pt")
+            
+            latents_list.append(new_latents)
+        
+        # Concatenate all latents
+        latents = torch.cat(latents_list, dim=2)
+        
+        return latents
             

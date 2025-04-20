@@ -14,87 +14,94 @@ import math
 from utils.freeinit_utils import freq_mix_3d, get_freq_filter
 import torchvision.transforms as transforms
 from einops import rearrange, repeat
+import csv
+from PIL import Image
+import torch.nn.functional as F
 
-def load_images_as_tensor(image_dir, image_size=(256,256), model=None):
-
-    transform = transforms.Compose([
-        transforms.Resize(min(image_size)),
-        transforms.CenterCrop(image_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-    ])
-
-    videos = []
-    ## Input Single Frame
-    image = Image.open(f"{image_dir}/cake.png").convert("RGB")
-    image_tensor = transform(image).unsqueeze(1)
-    videos = repeat(image_tensor, 'c t h w -> c (repeat t) h w', repeat=16)
-    print(f"The video shape is: {videos.shape}")
-    if isinstance(videos, list):
-        videos = torch.stack(videos, dim=0).to("cuda")
-        videos = videos.permute(1, 0, 2, 3)
-        videos = videos.unsqueeze(0)
-    else: 
-        videos = videos.unsqueeze(0).to("cuda")
-
-    print(f"The video shape is {videos.shape}")
-
-    b, c, t, h, w = videos.shape
-    # x = rearrange(videos, 'b c t h w -> (b t) c h w')
-    z = model.encode_first_stage_2DAE(videos)
-    # z = rearrange(z, '(b t) c h w -> b c t h w', b=b, t=t)
-    print(f"The shape of the z is {z.shape}")
-
-    return z
-
-def prepare_latents(args, latents_dir, sampler, model=None):
-    latents_list = []
-
-    video = torch.load(latents_dir+f"/{args.num_inference_steps}.pt")
-    print("The shape of the video is: ", video.shape)
-  
-    if args.lookahead_denoising:
-        """
-        To have enough initiail noisy frames to start the lookahead denoising
-        Generate dummy noisy frames for the first half of the video
-        """
-
-        for i in range(args.video_length // 2): # 4/2 = 2 
-            alpha = sampler.ddim_alphas[0]
+def prepare_latents(args, input_path, sampler, model=None, data=None):
+    """
+    Prepare latents for sampling, with support for DAVIS data and DDIM inversion.
+    
+    Args:
+        args: Command line arguments
+        input_path: Path to save latents
+        sampler: DDIM sampler instance
+        model: Diffusion model
+        data: Optional DAVIS data tuple (frames, masks)
+        
+    Returns:
+        latents: Prepared latents for sampling
+    """
+    if data is not None:
+        # Handle DAVIS data
+        frames, masks = data
+        frames = frames.to("cuda")
+        
+        # Convert RGBA to RGB if needed
+        if frames.shape[1] == 4:  # RGBA
+            # Convert RGBA to RGB by removing alpha channel
+            frames = frames[:, :3]  # Keep only RGB channels
+        
+        # Use DDIM inversion from the sampler
+        latents = sampler.ddim_inversion(
+            frames=frames,
+            num_inference_steps=args.num_inference_steps,
+            eta=args.eta,
+            latents_dir=input_path
+        )
+    else:
+        # Original latent preparation logic for non-DAVIS data
+        latents_list = []
+        video = torch.load(input_path+f"/{args.num_inference_steps}.pt")
+        
+        if args.lookahead_denoising:
+            video = video.to("cuda")
+            for i in range(args.video_length // 2):
+                alpha = sampler.ddim_alphas[0]
+                beta = 1 - alpha
+                latents = alpha**(0.5) * video[:,:,[0]] + beta**(0.5) * torch.randn_like(video[:,:,[0]])
+                latents_list.append(latents)
+         
+        for i in range(args.num_inference_steps): 
+            alpha = sampler.ddim_alphas[i]
             beta = 1 - alpha
-            latents = alpha**(0.5) * video[:,:,[0]] + beta**(0.5) * torch.randn_like(video[:,:,[0]])
-            latents_list.append(latents) # [z1, z1]
-
-    # This is to prepare the latents for denoising
-    for i in range(args.num_inference_steps): 
-        alpha = sampler.ddim_alphas[i] # image -> noise
-        beta = 1 - alpha
-        frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) 
-        latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
-        latents_list.append(latents)
-
-    latents = torch.cat(latents_list, dim=2) # [1, 4, 72, 40, 64])
-    print("The latents shape is", latents.shape)  
-    # latents.unsqueeze(0)
-
-
-    return latents 
-
-
-
-def shift_latents(latents):
-    ## Use FreeInit to shift the latents with more context on the anchor frame
-    anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
+            frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) 
+            latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
+            latents_list.append(latents)
+            
+        latents = torch.cat(latents_list, dim=2)
     
-    latents[:, :, :-1] = latents[:, :, 1:].clone()
-
-    new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
-    
-    freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
-
-    latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
-
     return latents
+
+
+
+def shift_latents(latents, masks=None):
+
+    if masks is None:
+        anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
+        
+        latents[:, :, :-1] = latents[:, :, 1:].clone()
+
+        new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
+        
+        freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
+
+        latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
+        
+        return latents
+    
+    else:
+        # shift latents
+        latents[:,:,:-1] = latents[:,:,1:].clone()
+
+        # add new noise to the last frame
+        latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+
+        # shift masks
+        masks[:,:,:-1] = masks[:,:,1:].clone()
+        ## create all zeros mask for the last frame
+        masks[:,:,-1] = torch.zeros_like(masks[:,:,-1])
+        return latents, masks
 
 def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1.0,\
                         cfg_scale=1.0, temporal_cfg_scale=None, **kwargs):
@@ -212,23 +219,27 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
     return batch_images, ddim_sampler, samples
 
 def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
-                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, targets=None, **kwargs):
+                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image_path=None, targets=None, gamma=0.5, use_self_attention=False, davis_data=None, anchor_frame=None, **kwargs):
     batch_size = noise_shape[0]
     kwargs.update({"clean_cond": True})
 
-    ## Obtain the conditioning image
-    transform = transforms.Compose([
-        transforms.Resize((args.height//8, args.width//8)),
-        transforms.CenterCrop((args.height//8, args.width//8)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-    ])
-    cond_image = Image.open(args.cond_image_path).convert("RGB")
-    cond_image = transform(cond_image).unsqueeze(1).unsqueeze(0)
-    cond_image = cond_image.to("cuda")
+    ## Handle concept removal case
+    if conditioned_image_path == "empty":
+        cond_image = None
+    else:
+        ## Obtain the conditioning image
+        transform = transforms.Compose([
+            transforms.Resize((args.height//8, args.width//8)),
+            transforms.CenterCrop((args.height//8, args.width//8)),
+            transforms.ToTensor(),
+        ])
+        cond_image = Image.open(conditioned_image_path).convert("RGBA")
+        cond_image = transform(cond_image).unsqueeze(1).unsqueeze(0)
+        
+        cond_image = cond_image.to("cuda")
 
     ## Obtain the target
-    target = targets ## Input it into the sampling process
+    target = targets
 
     # check condition bs
     if conditioning is not None:
@@ -249,7 +260,6 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
     ## construct unconditional guidance
     if cfg_scale != 1.0:
         prompts = batch_size * [""]
-        #prompts = N * T * [""]  ## if is_imgbatch=True
         uc_emb = model.get_learned_conditioning(prompts)
         
         uc = {key:cond[key] for key in cond.keys()}
@@ -259,7 +269,7 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
         uc = None
     
     # Latents preparation
-    latents = prepare_latents(args, latents_dir, ddim_sampler, model) 
+    latents = prepare_latents(args, latents_dir, ddim_sampler, model, data=davis_data)
     num_frames_per_gpu = args.video_length 
     if args.save_frames:
         fifo_dir = os.path.join(output_dir, "fifo")
@@ -272,28 +282,114 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
     if args.lookahead_denoising:
         timesteps = np.concatenate([np.full((args.video_length//2,), timesteps[0]), timesteps]) 
         indices = np.concatenate([np.full((args.video_length//2,), 0), indices]) 
+
+    # Load DAVIS data if provided
+    if davis_data is not None:
+        frames, masks = davis_data
+        frames = frames.to("cuda")
+        masks = masks.to("cuda")
+        current_frame_idx = 0
+    # anchor_frame = frames[:, :, 0].clone().unsqueeze(2)
+
     for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"):
         for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
             start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
             midpoint_idx = start_idx + num_frames_per_gpu // 2 
             end_idx = start_idx + num_frames_per_gpu 
-
+            
             t = timesteps[start_idx:end_idx] 
-            idx = indices[start_idx:end_idx]
-
+            idx = indices[start_idx:end_idx]            
+            print(f"start_idx: {start_idx}, midpoint_idx: {midpoint_idx}, end_idx: {end_idx}")
+            print(f"t: {t}, idx: {idx}")
             input_latents = latents[:,:,start_idx:end_idx].clone() 
-            output_latents, _ = ddim_sampler.fifo_onestep(
-                                            cond=cond,
-                                            shape=noise_shape,
-                                            latents=input_latents,
-                                            timesteps=t,
-                                            indices=idx,
-                                            unconditional_guidance_scale=cfg_scale,
-                                            unconditional_conditioning=uc,
-                                            cond_image=cond_image,
-                                            target=target,
-                                            **kwargs
-                                            )
+            input_masks = masks[:,:,start_idx:end_idx].clone() if masks is not None else None
+            ## Visualize the latents
+            latents_dir = os.path.join("visualizations", "latents")
+            os.makedirs(latents_dir, exist_ok=True)
+            
+            # Check if input_latents is not empty and has correct dimensions
+            if input_latents.numel() > 0 and input_latents.dim() == 5:  # [B, C, T, H, W]
+                # Ensure we have valid data to visualize
+                if input_latents.shape[2] > 0:  # Check if we have frames
+                    # Squeeze batch dimension and permute for visualization
+                    vis_latents = input_latents.squeeze(0).permute(1, 0, 2, 3)  # [T, C, H, W]
+                    try:
+                        latents_grid = torchvision.utils.make_grid(
+                            vis_latents,
+                            nrow=vis_latents.shape[0],  # Use actual number of frames
+                            normalize=True,
+                            padding=2
+                        )
+                        torchvision.utils.save_image(latents_grid, os.path.join(latents_dir, "latents_grid_{}.png".format(i)))
+                    except Exception as e:
+                        print(f"Warning: Could not visualize latents: {str(e)}")
+            else:
+                print(f"Warning: Invalid latents shape for visualization: {input_latents.shape}")   
+
+            # Use DAVIS masks if available
+            if davis_data is not None:
+                ## Only for the first 16 frames and others dont use masks
+                if input_masks.shape[2] == input_latents.shape[2]:
+                    current_masks = input_masks
+
+                    ## Visualize the masks
+                    masks_dir = os.path.join("visualizations", "masks")
+                    os.makedirs(masks_dir, exist_ok=True)
+                    masks_grid = torchvision.utils.make_grid(
+                        current_masks.squeeze(0).permute(1, 0, 2, 3),
+                        nrow=len(current_masks),
+                        normalize=True,
+                        padding=2)
+                    torchvision.utils.save_image(masks_grid, os.path.join(masks_dir, "masks_grid_{}.png".format(i)))
+                    
+                    output_latents, _ = ddim_sampler.fifo_onestep(
+                        cond=cond,
+                        shape=noise_shape,
+                        latents=input_latents,
+                        timesteps=t,
+                        indices=idx,
+                        unconditional_guidance_scale=cfg_scale,
+                        unconditional_conditioning=uc,
+                        cond_image=cond_image,
+                        target=target,
+                        gamma=gamma,
+                        use_self_attention=use_self_attention,
+                        davis_masks=input_masks,  # Pass DAVIS masks
+                        **kwargs
+                    )
+                else:
+                    # For subsequent iterations, don't use masks
+                    output_latents, _ = ddim_sampler.fifo_onestep(
+                        cond=cond,
+                        shape=noise_shape,
+                        latents=input_latents,
+                        timesteps=t,
+                        indices=idx,
+                        unconditional_guidance_scale=cfg_scale,
+                        unconditional_conditioning=uc,
+                        cond_image=cond_image,
+                        target=target,
+                        gamma=gamma,
+                        use_self_attention=use_self_attention,
+                        no_sam=True,
+                        **kwargs
+                    )
+            else:
+                output_latents, _ = ddim_sampler.fifo_onestep(
+                    cond=cond,
+                    shape=noise_shape,
+                    latents=input_latents,
+                    timesteps=t,
+                    indices=idx,
+                    unconditional_guidance_scale=cfg_scale,
+                    unconditional_conditioning=uc,
+                    cond_image=cond_image,
+                    target=target,
+                    gamma=gamma,
+                    use_self_attention=use_self_attention,
+                    **kwargs
+                )
+
             if args.lookahead_denoising:
                 latents[:,:,midpoint_idx:end_idx] = output_latents[:,:,-(num_frames_per_gpu//2):] 
             else:
@@ -302,16 +398,19 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
         
 
         # reconstruct from latent to pixel space
-        first_frame_idx = args.video_length // 2 if args.lookahead_denoising else 0 # 2
-        frame_tensor = model.decode_first_stage_2DAE(latents[:,:,[first_frame_idx]]) # b,c,1,H,W
+        first_frame_idx = args.video_length // 2 if args.lookahead_denoising else 0
+        frame_tensor = model.decode_first_stage_2DAE(latents[:,:,[first_frame_idx]])
         image = tensor2image(frame_tensor)
         if save_frames:
             fifo_path = os.path.join(fifo_dir, f"{i}.png")
             image.save(fifo_path)
         fifo_video_frames.append(image)
-            
-        ## Tihs step dequeue the fully denoised one and enqueue a fully noise one
-        latents = shift_latents(latents) 
+
+        ## Shift the latents
+        if masks is not None:
+            latents, masks = shift_latents(latents, masks) 
+        else:
+            latents = shift_latents(latents) 
 
     return fifo_video_frames
 
@@ -374,7 +473,6 @@ def fifo_ddim_sampling_multiprompts(args, model, conditioning, noise_shape, ddim
 
         cond.update({'c_crossattn':[embed]})
         for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
-            breakpoint()
             start_idx = rank*(num_frames_per_gpu // 2) if args.lookahead_denoising else rank*num_frames_per_gpu
             midpoint_idx = start_idx + num_frames_per_gpu // 2
             end_idx = start_idx + num_frames_per_gpu
@@ -448,17 +546,36 @@ def load_model_checkpoint(model, ckpt):
     return model
 
 
-def load_prompts(prompt_file):
-    f = open(prompt_file, 'r')
-    prompt_list = []
-    for idx, line in enumerate(f.readlines()):
-        l = line.split(".")
-        prompt = l[0].strip()
-        target = l[1].strip()+"."
-        if len(l) != 0:
-            prompt_list.append((prompt, target))
-        f.close()
-    return prompt_list
+def load_prompts(prompt_file, prompt_index=None):
+    with open(prompt_file, 'r') as f:
+        # Use csv reader to properly handle quoted strings containing commas
+        reader = csv.DictReader(f)
+        
+        if prompt_index is not None:
+            # Skip to the desired row
+            for i, row in enumerate(reader):
+                if i == prompt_index:
+                    return [{
+                        "prompt": row["prompt"].strip(),
+                        "conditioned_object": row["conditioned_object"].strip(),
+                        "conditioned_image_path": row["conditioned_image_path"].strip(),
+                        "conditioned_prompt": row["conditioned_prompt"].strip()+".",
+                        "gamma": float(row["gamma"].strip())
+                    }]
+            raise ValueError(f"Prompt index {prompt_index} exceeds number of available prompts")
+        
+        # If no index specified, return all prompts (original behavior)
+        prompt_list = []
+        for row in reader:
+            prompt_data = {
+                "prompt": row["prompt"].strip(),
+                "conditioned_object": row["conditioned_object"].strip(),
+                "conditioned_image_path": row["conditioned_image_path"].strip(),
+                "conditioned_prompt": row["conditioned_prompt"].strip()+".",
+                "gamma": float(row["gamma"].strip())
+            }
+            prompt_list.append(prompt_data)
+        return prompt_list
 
 
 def load_video_batch(filepath_list, frame_stride, video_size=(256,256), video_frames=16):
@@ -499,7 +616,6 @@ def load_video_batch(filepath_list, frame_stride, video_size=(256,256), video_fr
     
     return torch.stack(batch_tensor, dim=0)
 
-from PIL import Image
 def load_image_batch(filepath_list, image_size=(256,256)):
     batch_tensor = []
     for filepath in filepath_list:
@@ -564,5 +680,125 @@ def tensor2image(batch_tensors):
     image = (image * 255).to(torch.uint8).permute(1, 2, 0) # h,w,c
     image = image.numpy()
     image = Image.fromarray(image)
-    
     return image
+
+
+def load_davis_data(video_name, davis_root, frame_stride=1, video_size=(256,256), video_frames=16, sampling_strategy="first"):
+    """
+    Load frames and masks from DAVIS dataset.
+    
+    Args:
+        video_name (str): Name of the video sequence
+        davis_root (str): Root directory of DAVIS dataset
+        frame_stride (int): Stride for frame sampling (used only for uniform sampling)
+        video_size (tuple): Target size for frames (height, width)
+        video_frames (int): Number of frames to load
+        sampling_strategy (str): Strategy for selecting frames ("first", "random", or "uniform")
+        
+    Returns:
+        tuple: (frames_tensor, masks_tensor)
+    """
+    # Construct paths
+    frames_dir = os.path.join(davis_root, 'JPEGImages', '480p', video_name)
+    masks_dir = os.path.join(davis_root, 'Annotations', '480p', video_name)
+    
+    # Get all frame files
+    frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+    mask_files = sorted([f for f in os.listdir(masks_dir) if f.endswith('.png')])
+    
+    total_frames = len(frame_files)
+    
+    # Select frame indices based on strategy
+    if sampling_strategy == "first":
+        # Take first 16 frames
+        frame_indices = list(range(min(video_frames, total_frames)))
+    elif sampling_strategy == "random":
+        # Randomly sample 16 frames
+        frame_indices = np.random.choice(total_frames, size=min(video_frames, total_frames), replace=False)
+        frame_indices = sorted(frame_indices)  # Sort to maintain temporal order
+    elif sampling_strategy == "uniform":
+        # Sample every nth frame to get 16 frames
+        if total_frames <= video_frames:
+            frame_indices = list(range(total_frames))
+        else:
+            # Calculate stride to get approximately 16 frames
+            stride = max(1, total_frames // video_frames)
+            frame_indices = list(range(0, total_frames, stride))[:video_frames]
+    else:
+        raise ValueError(f"Unknown sampling strategy: {sampling_strategy}")
+    
+    # Load frames and masks
+    frames = []
+    masks = []
+
+    for idx in frame_indices:
+        # Load frame
+        frame_path = os.path.join(frames_dir, frame_files[idx])
+        # Load as RGB instead of RGBA
+        frame = Image.open(frame_path).convert("RGBA")
+        # Convert to numpy array in uint8 format
+        frame = np.array(frame, dtype=np.uint8)
+        
+        # Only resize if dimensions don't match
+        if frame.shape[:2] != (video_size[0]*8, video_size[1]*8):
+            # Use Lanczos interpolation for highest quality
+            frame = cv2.resize(frame, (video_size[1]*8, video_size[0]*8), 
+                             interpolation=cv2.INTER_LANCZOS4)
+        
+        # Convert to tensor and normalize
+        frame_tensor = torch.from_numpy(frame).permute(2, 0, 1).float()
+        frame_tensor = (frame_tensor / 255. - 0.5) * 2
+        frames.append(frame_tensor)
+        
+        # Load mask using PIL instead of OpenCV
+        mask_path = os.path.join(masks_dir, mask_files[idx])
+        mask = Image.open(mask_path).convert('L')  # Convert to grayscale
+        
+        # Only resize mask if dimensions don't match
+        if mask.size != (video_size[1], video_size[0]):
+            # Use nearest neighbor for binary masks
+            mask = mask.resize((video_size[1], video_size[0]), 
+                             Image.Resampling.NEAREST)
+        
+        mask = np.array(mask, dtype=np.uint8)
+        masks.append(mask)
+    
+    # Convert to tensors
+    frames = torch.stack(frames)  # [T, C, H, W]
+    masks = torch.tensor(np.stack(masks)).unsqueeze(1).float()  # [T, 1, H, W]
+
+    # Add batch dimension and rearrange to [B, C, T, H, W]
+    frames = frames.unsqueeze(0).permute(0, 2, 1, 3, 4)  # [1, C, T, H, W]
+    masks = masks.unsqueeze(0).permute(0, 2, 1, 3, 4)  # [1, 1, T, H, W]
+
+    # Ensure masks are binary (0 or 1)
+    masks = (masks > 0).float()
+    
+    # Print tensor shapes for debugging
+    print(f"Frames tensor shape: {frames.shape}")
+    print(f"Masks tensor shape: {masks.shape}")
+    
+    # Visualize the sampled frames and masks
+    vis_dir = os.path.join("visualizations", "davis_data", video_name)
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    # Save frames and masks
+    for i in range(frames.shape[2]):  # T dimension
+        # Save frame
+        frame = frames[0, :, i]  # [C, H, W]
+        frame = (frame + 1.0) / 2.0  # Convert back to [0, 1] range for saving
+        torchvision.utils.save_image(frame, os.path.join(vis_dir, f"frame_{i:03d}.png"))
+        
+        # Save mask
+        mask = masks[0, :, i]  # [1, H, W]
+        torchvision.utils.save_image(mask, os.path.join(vis_dir, f"mask_{i:03d}.png"))
+    
+    # Print tensor shapes and value ranges
+    print(f"\nDAVIS Data Visualization for {video_name}:")
+    print(f"Frames tensor shape: {frames.shape}")
+    print(f"Frames value range: [{frames.min():.3f}, {frames.max():.3f}]")
+    print(f"Masks tensor shape: {masks.shape}")
+    print(f"Masks value range: [{masks.min():.3f}, {masks.max():.3f}]")
+    print(f"Visualizations saved to: {vis_dir}")
+    
+    return frames, masks
