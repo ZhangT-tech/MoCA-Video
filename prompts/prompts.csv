@@ -1,0 +1,97 @@
+prompt,conditioned_object,conditioned_image_path,conditioned_prompt,gamma
+"An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/robot.jpg","the condition is a robot", 2
+"An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/cats.jpg","the condition is a cat", 1.5
+"An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/penguin.jpg","the condition is a penguin",2
+"A superhero in a dynamic pose against a city skyline, cape flowing in the wind",superhero,"assets/eagle.jpg","the condition is an eagle",2
+"A ballet dancer performing on stage under dramatic lighting, wearing a flowing tutu",dancer,"assets/panda.jpg","the condition is a panda",1.2
+"A musician playing a grand piano in a concert hall",musician,"assets/lemon.jpg","the condition is a lemon",2
+"A firefighter in full gear, standing in front of a burning building",firefighter,"assets/heli.jpg","the condition is a helicopter",2
+"A deep-sea diver exploring a coral reef, surrounded by colorful fish",diver,"assets/pineapple.jpg","the condition is a pineapple",2
+"A construction worker operating heavy machinery at a building site",worker,"assets/car.jpg","the condition is a car",1.5
+"A cute teddy bear with soft brown fur and a red bow tie",teddy,"assets/hamster.jpg","the condition is a hamster",2
+"A majestic eagle soaring through the sky with its wings spread wide",eagle,"assets/eagle.jpg","the condition is an eagle",2
+"A brown bear walking through a forest, with sunlight filtering through the trees",bear,"assets/cats.png","the condition is a cat",2
+"A black swan gliding gracefully across a serene lake at sunset",blackswan,"assets/eagle.jpg","the condition is an eagle",0.8
+"A white boat sailing across calm ocean waters under a clear blue sky",boat,"assets/heli.jpg","the condition is a helicopter",2
+"A breakdancer performing dynamic moves on a city street",breakdance,"assets/robot.jpg","the condition is a robot",2
+"A majestic camel walking across a desert landscape",camel,"assets/horse.jpg","the condition is a horse",2
+"A cow with a bell grazing in a green pasture",cows,"assets/sheep.jpg","the condition is a sheep",2
+"A golden retriever running through a field of flowers",dog,"assets/wolf.jpg","the condition is a wolf",2
+"A drift car sliding through a chicane on a racetrack",drift-chicane,"assets/racecar.jpg","the condition is a race car",2
+"An elephant walking through tall grass in the savanna",elephant,"assets/rhino.jpg","the condition is a rhino",2
+"A flamingo standing in shallow water at sunset",flamingo,"assets/duck.jpg","the condition is a duck",2
+"A goat climbing on rocky terrain in the mountains",goat,"assets/deer.jpg","the condition is a deer",2
+"A mallard duck flying across a sunset sky",mallard-fly,"assets/eagle.jpg","the condition is an eagle",2
+"A rhino walking through the African savanna",rhino,"assets/elephant.jpg","the condition is an elephant",2
+"A person rollerblading through a city park",rollerblade,"assets/skater.jpg","the condition is a figure skater",2
+"A surfer riding a wave at sunset",surf,"assets/kayak.jpg","the condition is a kayak",2
+"A beautiful lavender field stretching to the horizon at sunset",lavender,"assets/rose.jpg","the condition is a rose",2
+"A blooming rose garden in full color under morning sunlight",rose,"assets/lavender.jpg","the condition is lavender",2
+"A bright yellow lemon tree in a Mediterranean garden",lemon,"assets/orange.jpg","the condition is an orange",2
+"A playful squirrel gathering nuts in an autumn forest",squirrel,"assets/hamster.jpg","the condition is a hamster",2
+"A majestic cattle herd grazing in a vast meadow",cattle,"assets/horse.jpg","the condition is a horse",2
+"A colorful tropical fish swimming in a coral reef",fish,"assets/dolphin.jpg","the condition is a dolphin",2
+"A powerful shark gliding through deep blue waters",shark,"assets/dolphin.jpg","the condition is a dolphin",2
+"A sleek airplane soaring through cloudy skies",airplane,"assets/heli.jpg","the condition is a helicopter",2
+"A vintage bicycle leaning against a rustic brick wall",bicycle,"assets/motorcycle.jpg","the condition is a motorcycle",2
+"A modern ship crossing the ocean at sunset",ship,"assets/sailboat.jpg","the condition is a sailboat",2
+"An elegant wooden chair in a sunlit room",chair,"assets/sofa.jpg","the condition is a sofa",2
+"A modern desk setup in a minimalist office space",desk,"assets/table.jpg","the condition is a table",2
+"A futuristic robot working in a high-tech laboratory",robot,"assets/computer.jpg","the condition is a computer",2
+"A stylish phone displaying holographic images",phone,"assets/tablet.jpg","the condition is a tablet",2
+"A beautiful art deco lamp casting warm light",lamp,"assets/chandelier.jpg","the condition is a chandelier",2
+"A serene waterfall cascading down rocky cliffs",water,"assets/river.jpg","the condition is a river",2
+"A stylish backpack sitting on a wooden bench in a park",backpack,"assets/suitcase.jpg","the condition is a suitcase",2
+"A decorative Venetian mask displayed on a velvet backdrop",mask,"assets/hat.jpg","the condition is a hat",2
+"A mysterious wooden box with intricate carvings",box,"assets/chest.jpg","the condition is a treasure chest",2
+"An antique key hanging on a rustic wall",key,"assets/lock.jpg","the condition is a lock",2
+"A leather leash hanging by a doorway",leash,"assets/rope.jpg","the condition is a rope",2
+"An ornate lock on an ancient wooden door",lock,"assets/key.jpg","the condition is a key",2
+"A scroll of paper with beautiful calligraphy",paper,"assets/book.jpg","the condition is a book",2
+"A selfie stick extending over a scenic viewpoint",selfie_stick,"assets/camera.jpg","the condition is a camera",2
+"A modern cellphone displaying holographic images",cellphone,"assets/tablet.jpg","the condition is a tablet",2
+"A drone flying over mountain landscapes",drone,"assets/helicopter.jpg","the condition is a helicopter",2
+"A vintage microphone on a stage under spotlights",microphone,"assets/guitar.jpg","the condition is a guitar",2
+"A lush potted plant by a sunny window",potted_plant,"assets/vase.jpg","the condition is a vase",2
+"A wooden rack filled with vintage wines",rack,"assets/shelf.jpg","the condition is a shelf",2
+"An elegant guitar resting on a velvet chair",guitar,"assets/violin.jpg","the condition is a violin",2
+"A classical violin on a polished piano",violin,"assets/guitar.jpg","the condition is a guitar",2
+"A vintage glass bottle catching morning light",bottle,"assets/vase.jpg","the condition is a vase",2
+"Fresh grass swaying in a summer breeze",grass,"assets/flowers.jpg","the condition is flowers",2
+"A wooden swing moving gently in a garden",swing,"assets/bench.jpg","the condition is a bench",2
+"A soccer ball flying through stadium lights",ball,"assets/frisbee.jpg","the condition is a frisbee",2
+"A golf club swinging on a misty morning course",golf_club,"assets/baseball_bat.jpg","the condition is a baseball bat",2
+"A competition gun at a shooting range",gun,"assets/bow.jpg","the condition is a bow",2
+"A hoverboard gliding through city streets",hoverboard,"assets/skateboard.jpg","the condition is a skateboard",2
+"A colorful kite soaring in blue skies",kite,"assets/balloon.jpg","the condition is a balloon",2
+"An oar cutting through crystal lake waters",oar,"assets/paddle.jpg","the condition is a paddle",2
+"A paraglider floating over coastal cliffs",paraglide,"assets/hang_glider.jpg","the condition is a hang glider",2
+"A pole vaulter mid-jump at sunset",pole,"assets/javelin.jpg","the condition is a javelin",2
+"A hockey puck sliding across ice",puck,"assets/ball.jpg","the condition is a ball",2
+"A climbing rope against mountain rocks",rope,"assets/chain.jpg","the condition is a chain",2
+"A sail catching wind on ocean waves",sail,"assets/flag.jpg","the condition is a flag",2
+"A skateboard in mid-trick at a skate park",skateboard,"assets/surfboard.jpg","the condition is a surfboard",2
+"A pair of skis cutting through fresh powder",ski,"assets/snowboard.jpg","the condition is a snowboard",2
+"Ski poles planted in fresh mountain snow",ski_poles,"assets/hiking_poles.jpg","the condition is hiking poles",2
+"A snowboard carving through winter slopes",snowboard,"assets/ski.jpg","the condition is a ski",2
+"A hockey stick scoring a winning goal",stick,"assets/baseball_bat.jpg","the condition is a baseball bat",2
+"A surfboard riding a perfect wave",surfboard,"assets/skateboard.jpg","the condition is a skateboard",2
+"A tennis racket mid-serve on court",tennis_racket,"assets/badminton_racket.jpg","the condition is a badminton racket",2
+"A commercial airplane soaring through clouds",airplane,"assets/helicopter.jpg","the condition is a helicopter",2
+"A vintage bicycle leaning on a cafe wall",bicycle,"assets/motorcycle.jpg","the condition is a motorcycle",2
+"A sailboat gliding through calm waters",boat,"assets/yacht.jpg","the condition is a yacht",2
+"A red bus driving through city streets",bus,"assets/train.jpg","the condition is a train",2
+"A horse-drawn carriage in old town streets",carriage,"assets/wagon.jpg","the condition is a wagon",2
+"A sports car racing on a mountain road",car,"assets/motorcycle.jpg","the condition is a motorcycle",2
+"An excavator working at a construction site",excavator,"assets/crane.jpg","the condition is a crane",2
+"A golf cart cruising on green fairways",golf_cart,"assets/atv.jpg","the condition is an ATV",2
+"A helicopter flying over city skyscrapers",helicopter,"assets/airplane.jpg","the condition is an airplane",2
+"A racing kart speeding through turns",kart,"assets/motorcycle.jpg","the condition is a motorcycle",2
+"A motorcycle leaning into a curved road",motorcycle,"assets/bicycle.jpg","the condition is a bicycle",2
+"An electric scooter parked by a cafe",scooter,"assets/bicycle.jpg","the condition is a bicycle",2
+"A baby stroller in a peaceful park",stroller,"assets/wheelchair.jpg","the condition is a wheelchair",2
+"A steam train crossing mountain tracks",train,"assets/bus.jpg","the condition is a bus",2
+"A camping trailer under starry skies",trailer,"assets/rv.jpg","the condition is an RV",2
+"A tractor working in golden wheat fields",tractor,"assets/harvester.jpg","the condition is a harvester",2
+"A delivery truck on a busy highway",truck,"assets/van.jpg","the condition is a van",2
+"A wheelchair moving through hospital halls",wheelchair,"assets/stroller.jpg","the condition is a stroller",2
