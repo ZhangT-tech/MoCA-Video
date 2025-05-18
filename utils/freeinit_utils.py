@@ -23,6 +23,8 @@ def freq_mix_3d(x, noise, LPF):
         LPF = LPF.to(torch.float32)
 
     # FFT
+    x = x.squeeze(0)
+    noise = noise.squeeze(0)
     x_freq = fft.fftn(x, dim=(-3, -2, -1))  # torch.Size([3, 72, 1, 180])
     x_freq = fft.fftshift(x_freq, dim=(-3, -2, -1))
     noise_freq = fft.fftn(noise, dim=(-3, -2, -1))
@@ -30,11 +32,6 @@ def freq_mix_3d(x, noise, LPF):
 
     # Frequency mix
     HPF = 1 - LPF
-    print(f"The shape of x_freq is {x_freq.shape}")
-    print(f"The shape of LPF is {LPF.shape}")
-    print(f"The shape of noise_freq is {noise_freq.shape}")
-    print(f"The shape of HPF is {HPF.shape}")
-
     x_freq_low = x_freq * LPF
     noise_freq_high = noise_freq * HPF
     x_freq_mixed = x_freq_low + noise_freq_high  # Mix in freq domain

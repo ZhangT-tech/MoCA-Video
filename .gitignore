@@ -6,9 +6,7 @@ results/
 assets
 configs
 dcgm
-lvdm
 opensora_fifo
-prompts
 
 
 # checkpoints
@@ -20,6 +18,13 @@ opensoraplan_models/
 .fifo
 .sora
 dcgm
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.avi
+*.mov
 
 # others
 taming
@@ -29,4 +34,13 @@ Open-Sora-Plan
 results/
 checkpoints/
 deletes/
-llama-3-8b-Instruct/
+
+
+# Other repos
+Cogvideo*
+AnyV2V
+cog*
+Grounded-SAM-2/
+FreeBlend/
+datasets
+*.sh

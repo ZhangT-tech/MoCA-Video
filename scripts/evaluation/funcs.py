@@ -26,12 +26,15 @@ def prepare_latents(args, input_path, sampler, model=None, data=None):
         args: Command line arguments
         input_path: Path to save latents
         sampler: DDIM sampler instance
-        model: Diffusion model
         data: Optional DAVIS data tuple (frames, masks)
         
     Returns:
         latents: Prepared latents for sampling
     """
+    # Initialize latents list
+    latents_list = []
+    
+    # Get initial latents based on data source
     if data is not None:
         # Handle DAVIS data
         frames, masks = data
@@ -39,45 +42,50 @@ def prepare_latents(args, input_path, sampler, model=None, data=None):
         
         # Convert RGBA to RGB if needed
         if frames.shape[1] == 4:  # RGBA
-            # Convert RGBA to RGB by removing alpha channel
             frames = frames[:, :3]  # Keep only RGB channels
         
-        # Use DDIM inversion from the sampler
-        latents = sampler.ddim_inversion(
-            frames=frames,
-            num_inference_steps=args.num_inference_steps,
-            eta=args.eta,
-            latents_dir=input_path
-        )
+        # Encode frames to latents
+        initial_latents = model.encode_first_stage_2DAE(frames)
     else:
-        # Original latent preparation logic for non-DAVIS data
-        latents_list = []
-        video = torch.load(input_path+f"/{args.num_inference_steps}.pt")
-        
-        if args.lookahead_denoising:
-            video = video.to("cuda")
-            for i in range(args.video_length // 2):
-                alpha = sampler.ddim_alphas[0]
-                beta = 1 - alpha
-                latents = alpha**(0.5) * video[:,:,[0]] + beta**(0.5) * torch.randn_like(video[:,:,[0]])
-                latents_list.append(latents)
-         
-        for i in range(args.num_inference_steps): 
-            alpha = sampler.ddim_alphas[i]
+        # Load from file for non-DAVIS data
+        initial_latents = torch.load(input_path+f"/{args.num_inference_steps}.pt")
+        initial_latents = initial_latents.to("cuda")
+    
+    # Handle lookahead denoising if needed
+    if args.lookahead_denoising:
+        for i in range(args.video_length // 2):
+            alpha = sampler.ddim_alphas[0]
             beta = 1 - alpha
-            frame_idx = max(0, i-(args.num_inference_steps - args.video_length)) 
-            latents = (alpha)**(0.5) * video[:,:,[frame_idx]] + (1-alpha)**(0.5) * torch.randn_like(video[:,:,[frame_idx]])
+            latents = alpha**(0.5) * initial_latents[:,:,[0]] + beta**(0.5) * torch.randn_like(initial_latents[:,:,[0]])
             latents_list.append(latents)
-            
-        latents = torch.cat(latents_list, dim=2)
+    
+    # Main DDIM inversion loop - reused for both cases
+    for i in range(args.num_inference_steps):
+        alpha = sampler.ddim_alphas[i]
+        beta = 1 - alpha
+        
+        # Calculate frame index with proper offset
+        frame_idx = max(0, i - (args.num_inference_steps - initial_latents.shape[2]))
+        
+        # Get current frame's latents
+        current_latents = initial_latents[:,:,[frame_idx]]
+        
+        # Add noise with proper scaling
+        noise = torch.randn_like(current_latents)
+        new_latents = alpha**(0.5) * current_latents + (1-alpha)**(0.5) * noise
+        
+        latents_list.append(new_latents)
+    
+    # Concatenate all latents
+    latents = torch.cat(latents_list, dim=2)
     
     return latents
 
 
 
-def shift_latents(latents, masks=None):
-
-    if masks is None:
+def shift_latents(latents, davis_data=None, model=None):
+    
+    if davis_data is None:
         anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
         
         latents[:, :, :-1] = latents[:, :, 1:].clone()
@@ -91,17 +99,23 @@ def shift_latents(latents, masks=None):
         return latents
     
     else:
-        # shift latents
-        latents[:,:,:-1] = latents[:,:,1:].clone()
+        frames, masks = davis_data
+        anchor_frame = davis_data[0][:, :, -1].clone().unsqueeze(2) # b,c,1,h,w
+        if anchor_frame.shape[1] == 4:  # RGBA
+            anchor_frame = anchor_frame[:, :3]  # Keep only RGB channels
+            
+        anchor_frame = model.encode_first_stage_2DAE(anchor_frame)
+        latents[:, :, :-1] = latents[:, :, 1:].clone()
 
-        # add new noise to the last frame
-        latents[:,:,-1] = torch.randn_like(latents[:,:,-1])
+        new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
+        
+        freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
 
-        # shift masks
-        masks[:,:,:-1] = masks[:,:,1:].clone()
-        ## create all zeros mask for the last frame
-        masks[:,:,-1] = torch.zeros_like(masks[:,:,-1])
-        return latents, masks
+        latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
+        masks[:, :, :-1] = masks[:, :, 1:].clone()
+        masks[:, :, -1] = davis_data[1][:, :, -1].clone().unsqueeze(2)
+
+        return latents, (frames, masks)
 
 def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1.0,\
                         cfg_scale=1.0, temporal_cfg_scale=None, **kwargs):
@@ -160,35 +174,44 @@ def batch_ddim_sampling(model, cond, noise_shape, n_samples=1, ddim_steps=50, dd
     batch_variants = torch.stack(batch_variants, dim=1) # b,n,c,f,h,w
     return batch_variants
 
-def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
-                        cfg_scale=1.0, temporal_cfg_scale=None, latents_dir=None, **kwargs):
+def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,
+                      cfg_scale=1.0, temporal_cfg_scale=None, latents_dir=None,
+                      verbose=True):
+    """
+    Perform base DDIM sampling.
+    
+    Args:
+        model: The diffusion model
+        cond: Conditioning information
+        noise_shape: Shape of the noise tensor
+        ddim_steps: Number of DDIM steps
+        ddim_eta: DDIM eta parameter
+        cfg_scale: Classifier-free guidance scale
+        temporal_cfg_scale: Temporal guidance scale
+        latents_dir: Directory to save latents
+        verbose: Whether to print progress
+    """
     ddim_sampler = DDIMSampler(model)
-    uncond_type = model.uncond_type # used to improve the quality and diversity of generated samples with additional conditioning that is not directly rely on the input data
+    uncond_type = model.uncond_type
     batch_size = noise_shape[0]
+    
     ## construct unconditional guidance
     if cfg_scale != 1.0:
         if uncond_type == "empty_seq": # True, a neutral sample.
             prompts = batch_size * [""]
-            #prompts = N * T * [""]  ## if is_imgbatch=True
             uc_emb = model.get_learned_conditioning(prompts)
         elif uncond_type == "zero_embed":
             c_emb = cond["c_crossattn"][0] if isinstance(cond, dict) else cond
             uc_emb = torch.zeros_like(c_emb)
                 
-        ## process image embedding token
-        ## ===================== can add additional image embedding token =================================
         if hasattr(model, 'embedder'): # False 
             uc_img = torch.zeros(noise_shape[0],3,224,224).to(model.device)
-            ## img: b c h w >> b l c
             uc_img = model.get_image_embeds(uc_img)
             uc_emb = torch.cat([uc_emb, uc_img], dim=1)
         
         if isinstance(cond, dict): # True
-            uc = {key:cond[key] for key in cond.keys()} # preserve the original condition keys-value pairs
-            ## ===================== Check if it's working (Original not included) =================================
-            ## Maybe somewhere else, they add them together cause this is simply the unconditional guidance
-            # uc_emd = torch.cat([uc_emb, uc['c_crossattn'][0]], dim=1) # concatenate the cross attention key-value pairs
-            uc.update({'c_crossattn': [uc_emb]}) # update the cross attention key-value pairs, overwrite or concatenate?
+            uc = {key:cond[key] for key in cond.keys()}
+            uc.update({'c_crossattn': [uc_emb]})
         else: # False
             uc = uc_emb
     else:
@@ -197,47 +220,30 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,\
     x_T = None
 
     if ddim_sampler is not None:
-        kwargs.update({"clean_cond": True})
-        samples, _ = ddim_sampler.sample(S=ddim_steps,
-                                        conditioning=cond, # the preserved conditional embeddings
-                                        batch_size=noise_shape[0], # [batch_size, channels, frames, height, width] 
-                                        shape=noise_shape[1:],
-                                        verbose=True,
-                                        unconditional_guidance_scale=cfg_scale,
-                                        unconditional_conditioning=uc, # obtained last step
-                                        eta=ddim_eta,
-                                        temporal_length=noise_shape[2],
-                                        conditional_guidance_scale_temporal=temporal_cfg_scale,
-                                        x_T=x_T,
-                                        latents_dir=latents_dir,
-                                        **kwargs
-                                        )
-    ## reconstruct from latent to pixel space
-    # samples: b,c,f,h,w
-    batch_images = model.decode_first_stage_2DAE(samples) # b,c,f,H,W
-
+        samples, intermediates = ddim_sampler.sample(
+            S=ddim_steps,
+            conditioning=cond,
+            batch_size=noise_shape[0],
+            shape=noise_shape[1:],
+            verbose=verbose,
+            unconditional_guidance_scale=cfg_scale,
+            unconditional_conditioning=uc,
+            eta=ddim_eta,
+            temporal_length=noise_shape[2],
+            conditional_guidance_scale_temporal=temporal_cfg_scale,
+            x_T=x_T,
+            latents_dir=latents_dir
+        )
+    
+    # reconstruct from latent to pixel space
+    batch_images = model.decode_first_stage_2DAE(samples)  # b,c,f,H,W
+    
     return batch_images, ddim_sampler, samples
 
 def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
-                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image_path=None, targets=None, gamma=0.5, use_self_attention=False, davis_data=None, anchor_frame=None, **kwargs):
+                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image=None, targets=None, gamma=0.5, use_self_attention=False, davis_data=None, anchor_frame=None, **kwargs):
     batch_size = noise_shape[0]
     kwargs.update({"clean_cond": True})
-
-    ## Handle concept removal case
-    if conditioned_image_path == "empty":
-        cond_image = None
-    else:
-        ## Obtain the conditioning image
-        transform = transforms.Compose([
-            transforms.Resize((args.height//8, args.width//8)),
-            transforms.CenterCrop((args.height//8, args.width//8)),
-            transforms.ToTensor(),
-        ])
-        cond_image = Image.open(conditioned_image_path).convert("RGBA")
-        cond_image = transform(cond_image).unsqueeze(1).unsqueeze(0)
-        
-        cond_image = cond_image.to("cuda")
-
     ## Obtain the target
     target = targets
 
@@ -263,7 +269,11 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
         uc_emb = model.get_learned_conditioning(prompts)
         
         uc = {key:cond[key] for key in cond.keys()}
-        uc.update({'c_crossattn': [uc_emb]})
+        # Handle both c_crossattn and conditioned_prompt
+        if 'c_crossattn' in cond:
+            uc.update({'c_crossattn': [uc_emb]})
+        if 'conditioned_prompt' in cond:
+            uc.update({'conditioned_prompt': [uc_emb]})
         
     else:
         uc = None
@@ -287,9 +297,10 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
     if davis_data is not None:
         frames, masks = davis_data
         frames = frames.to("cuda")
-        masks = masks.to("cuda")
-        current_frame_idx = 0
-    # anchor_frame = frames[:, :, 0].clone().unsqueeze(2)
+        if masks is not None:
+            masks = masks.to("cuda")
+    else:
+        masks = None
 
     for i in trange(args.new_video_length + args.num_inference_steps - args.video_length, desc="fifo sampling"):
         for rank in reversed(range(2 * args.num_partitions if args.lookahead_denoising else args.num_partitions)):
@@ -303,77 +314,24 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
             print(f"t: {t}, idx: {idx}")
             input_latents = latents[:,:,start_idx:end_idx].clone() 
             input_masks = masks[:,:,start_idx:end_idx].clone() if masks is not None else None
-            ## Visualize the latents
-            latents_dir = os.path.join("visualizations", "latents")
-            os.makedirs(latents_dir, exist_ok=True)
-            
-            # Check if input_latents is not empty and has correct dimensions
-            if input_latents.numel() > 0 and input_latents.dim() == 5:  # [B, C, T, H, W]
-                # Ensure we have valid data to visualize
-                if input_latents.shape[2] > 0:  # Check if we have frames
-                    # Squeeze batch dimension and permute for visualization
-                    vis_latents = input_latents.squeeze(0).permute(1, 0, 2, 3)  # [T, C, H, W]
-                    try:
-                        latents_grid = torchvision.utils.make_grid(
-                            vis_latents,
-                            nrow=vis_latents.shape[0],  # Use actual number of frames
-                            normalize=True,
-                            padding=2
-                        )
-                        torchvision.utils.save_image(latents_grid, os.path.join(latents_dir, "latents_grid_{}.png".format(i)))
-                    except Exception as e:
-                        print(f"Warning: Could not visualize latents: {str(e)}")
-            else:
-                print(f"Warning: Invalid latents shape for visualization: {input_latents.shape}")   
 
             # Use DAVIS masks if available
-            if davis_data is not None:
-                ## Only for the first 16 frames and others dont use masks
-                if input_masks.shape[2] == input_latents.shape[2]:
-                    current_masks = input_masks
-
-                    ## Visualize the masks
-                    masks_dir = os.path.join("visualizations", "masks")
-                    os.makedirs(masks_dir, exist_ok=True)
-                    masks_grid = torchvision.utils.make_grid(
-                        current_masks.squeeze(0).permute(1, 0, 2, 3),
-                        nrow=len(current_masks),
-                        normalize=True,
-                        padding=2)
-                    torchvision.utils.save_image(masks_grid, os.path.join(masks_dir, "masks_grid_{}.png".format(i)))
-                    
-                    output_latents, _ = ddim_sampler.fifo_onestep(
-                        cond=cond,
-                        shape=noise_shape,
-                        latents=input_latents,
-                        timesteps=t,
-                        indices=idx,
-                        unconditional_guidance_scale=cfg_scale,
-                        unconditional_conditioning=uc,
-                        cond_image=cond_image,
-                        target=target,
-                        gamma=gamma,
-                        use_self_attention=use_self_attention,
-                        davis_masks=input_masks,  # Pass DAVIS masks
-                        **kwargs
-                    )
-                else:
-                    # For subsequent iterations, don't use masks
-                    output_latents, _ = ddim_sampler.fifo_onestep(
-                        cond=cond,
-                        shape=noise_shape,
-                        latents=input_latents,
-                        timesteps=t,
-                        indices=idx,
-                        unconditional_guidance_scale=cfg_scale,
-                        unconditional_conditioning=uc,
-                        cond_image=cond_image,
-                        target=target,
-                        gamma=gamma,
-                        use_self_attention=use_self_attention,
-                        no_sam=True,
-                        **kwargs
-                    )
+            if masks is not None:
+                output_latents, _ = ddim_sampler.fifo_onestep(
+                    cond=cond,
+                    shape=noise_shape,
+                    latents=input_latents,
+                    timesteps=t,
+                    indices=idx,
+                    unconditional_guidance_scale=cfg_scale,
+                    unconditional_conditioning=uc,
+                    cond_image=conditioned_image,
+                    target=target,
+                    gamma=gamma,
+                    use_self_attention=use_self_attention,
+                    davis_masks=input_masks,  # Pass DAVIS masks
+                    **kwargs
+                )
             else:
                 output_latents, _ = ddim_sampler.fifo_onestep(
                     cond=cond,
@@ -383,7 +341,7 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                     indices=idx,
                     unconditional_guidance_scale=cfg_scale,
                     unconditional_conditioning=uc,
-                    cond_image=cond_image,
+                    cond_image=conditioned_image,
                     target=target,
                     gamma=gamma,
                     use_self_attention=use_self_attention,
@@ -408,7 +366,7 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
 
         ## Shift the latents
         if masks is not None:
-            latents, masks = shift_latents(latents, masks) 
+            latents, davis_data = shift_latents(latents, davis_data, model) 
         else:
             latents = shift_latents(latents) 
 
@@ -441,7 +399,6 @@ def fifo_ddim_sampling_multiprompts(args, model, conditioning, noise_shape, ddim
     ## construct unconditional guidance
     if cfg_scale != 1.0:
         prompts = batch_size * [""]
-        #prompts = N * T * [""]  ## if is_imgbatch=True
         uc_emb = model.get_learned_conditioning(prompts)
         
         uc = {key:cond[key] for key in cond.keys()}
@@ -802,3 +759,32 @@ def load_davis_data(video_name, davis_root, frame_stride=1, video_size=(256,256)
     print(f"Visualizations saved to: {vis_dir}")
     
     return frames, masks
+
+def get_davis_prompt(video_name, annotations_file="DAVIS/davis_text_annotations/Davis16_annot1.txt"):
+    """
+    Get the prompt for a DAVIS video sequence from the annotations file.
+    
+    Args:
+        video_name: Name of the DAVIS video sequence
+        annotations_file: Path to the annotations file
+        
+    Returns:
+        prompt: Constructed prompt in format "object " + conditioned_text
+    """
+    try:
+        with open(annotations_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split(' ', 2)  # Split into 3 parts: name, number, description
+                if len(parts) >= 3 and parts[0] == video_name:
+                    # Remove quotes from description
+                    description = parts[2].strip('"')
+                    # Construct prompt
+                    prompt = f"object {description}"
+                    return prompt
+    except FileNotFoundError:
+        print(f"Warning: Could not find annotations file at {annotations_file}")
+    except Exception as e:
+        print(f"Error reading annotations file: {e}")
+    
+    # Return default prompt if not found
+    return f"object {video_name}"

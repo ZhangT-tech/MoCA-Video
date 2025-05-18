@@ -16,10 +16,12 @@ logging.disable(logging.DEBUG)
 logging.disable(logging.WARNING)
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import math
 import torch.nn as nn
 from .visualization import VisualizationHelper
+import cv2
+import matplotlib.pyplot as plt
 
 class DDIMSampler(object):
     """
@@ -253,7 +255,7 @@ class DDIMSampler(object):
     def fifo_onestep(self, cond, shape, latents=None, timesteps=None, indices=None,
                      unconditional_guidance_scale=1., unconditional_conditioning=None, 
                      cond_image=None, target=None, use_self_attention=False,
-                     davis_masks=None, no_sam=False, **kwargs):
+                     davis_masks=None, **kwargs):
         device = self.model.betas.device        
         b, _, f, _, _ = shape
         ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long) # [16]
@@ -264,7 +266,7 @@ class DDIMSampler(object):
         
         latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts, 
                                         use_self_attention=use_self_attention,
-                                        davis_masks=davis_masks, no_sam=no_sam)
+                                        davis_masks=davis_masks)
 
         return latents, pred_x0
 
@@ -372,7 +374,7 @@ class DDIMSampler(object):
         return e_t
 
     @torch.no_grad()
-    def ddim_step(self, sample, noise_pred, indices, cond_image, target, ts, gamma=0.5, use_self_attention=False, davis_masks=None, no_sam=False):
+    def ddim_step(self, sample, noise_pred, indices, cond_image, target, ts, gamma=0.5, use_self_attention=False, davis_masks=None):
         """Modified DDIM step to support both attention mechanisms and DAVIS masks"""
         b, _, f, *_, device = *sample.shape, sample.device
 
@@ -387,15 +389,12 @@ class DDIMSampler(object):
         pred_x0s = []
 
         pre_masks = None
-
+        prev_frame = None
 
         # Initialize momentum if not already done
         if not hasattr(self, 'momentum'):
             self.momentum = torch.zeros_like(sample)
             self.beta = 0.9  # Momentum decay rate
-            
-        # Store previous frame for gradient calculation
-        prev_frame = None
 
         # Create visualization directory if it doesn't exist
         vis_dir = "visualizations/denoising"
@@ -420,71 +419,226 @@ class DDIMSampler(object):
             
             # Calculate motion gradient if we have a previous frame
             if prev_frame is not None:
-                motion_gradient = pred_x0 - prev_frame
-                motion_gradient = motion_gradient + 0.05 * dir_xt
+                motion_gradient = pred_x0 - prev_frame 
+                motion_gradient = motion_gradient + 1.5 * dir_xt # TODO: Experiment with different values # 0.05, 0.1, 0.2 1, 1.5, 2
                 self.momentum[:, :, [i]] = (
                     self.beta * self.momentum[:, :, [i-1]] + 
                     (1 - self.beta) * motion_gradient
                 )
-                correction_strength = 0.1 * (1.0 - timestep / 1000.0)
-                pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
-            
+                correction_strength = 2 * (1.0 - timestep / 1000.0)
+                momentum_corrected_dir = correction_strength * self.momentum[:, :, [i]] + dir_xt
+                momentum_corrected = correction_strength * self.momentum[:, :, [i]]
+                
+                # Normalize directions for visualization
+                dir_xt_norm = dir_xt / (dir_xt.abs().max() + 1e-8)
+                momentum_corrected_dir_norm = momentum_corrected_dir / (momentum_corrected_dir.abs().max() + 1e-8)
+                
+                # Convert to numpy and extract first 2 channels for direction visualization
+                dir_xt_np = dir_xt_norm[:, :2, 0].cpu().numpy()[0]  # [2,H,W]
+                momentum_dir_np = momentum_corrected_dir_norm[:, :2, 0].cpu().numpy()[0]  # [2,H,W]
+                
+                # Get latent for visualization (first 3 channels)
+                latent_vis = x[:, :3, 0].cpu().numpy()[0]  # [C,H,W]
+                latent_vis = np.transpose(latent_vis, (1, 2, 0))  # [H,W,C]
+                latent_vis = ((latent_vis + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                
+                # Calculate differences between original and momentum-corrected directions
+                diff_magnitude = np.sqrt(np.sum((momentum_dir_np - dir_xt_np)**2, axis=0))
+                angle_diff = np.arctan2(momentum_dir_np[1], momentum_dir_np[0]) - np.arctan2(dir_xt_np[1], dir_xt_np[0])
+                angle_diff = np.rad2deg(angle_diff)  # Convert to degrees
+                
+                # Create visualization directory
+                vis_dir = "visualizations/directions"
+                os.makedirs(vis_dir, exist_ok=True)
+                
+                # Create figure with subplots
+                plt.figure(figsize=(20, 15))
+                plt.style.use('dark_background')
+                
+                # Process latent for visualization
+                latent_vis = pred_x0[:, :3, 0].cpu().numpy()[0]  # [C,H,W]
+                # Convert latent to grayscale by taking mean across channels
+                latent_vis = np.mean(latent_vis, axis=0)  # [H,W]
+                # Normalize to [0, 255]
+                latent_vis = ((latent_vis - latent_vis.min()) / (latent_vis.max() - latent_vis.min()) * 255).astype(np.uint8)
+                
+                # Direction vector field (Original)
+                plt.subplot(221)
+                Y, X = np.mgrid[0:dir_xt_np.shape[1]:4, 0:dir_xt_np.shape[2]:4]
+                U = dir_xt_np[0, ::4, ::4]
+                V = dir_xt_np[1, ::4, ::4]
+                
+                # Calculate significant directions (above mean magnitude)
+                dir_magnitude_local = np.sqrt(U**2 + V**2)
+                significant_dirs = dir_magnitude_local > np.mean(dir_magnitude_local)
+                
+                plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
+                # Plot significant directions in white
+                for i in range(len(X)):
+                    for j in range(len(Y)):
+                        if significant_dirs[i, j]:
+                            plt.quiver(X[i, j], Y[i, j], U[i, j], V[i, j],
+                                     color='white',
+                                     scale=15,
+                                     width=0.005,
+                                     headwidth=7,
+                                     headlength=10,
+                                     headaxislength=7)
+                
+                plt.title("Original Directions\nWhite = Significant Changes", color='white', pad=20)
+                plt.axis('off')
+                
+                # Momentum vector field
+                plt.subplot(222)
+                U_mom = momentum_dir_np[0, ::4, ::4]
+                V_mom = momentum_dir_np[1, ::4, ::4]
+                
+                # Calculate significant momentum directions
+                mom_magnitude_local = np.sqrt(U_mom**2 + V_mom**2)
+                significant_mom = mom_magnitude_local > np.mean(mom_magnitude_local)
+                
+                plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
+                # Plot significant momentum directions in white
+                for i in range(len(X)):
+                    for j in range(len(Y)):
+                        if significant_mom[i, j]:
+                            plt.quiver(X[i, j], Y[i, j], U_mom[i, j], V_mom[i, j],
+                                     color='white',
+                                     scale=15,
+                                     width=0.005,
+                                     headwidth=7,
+                                     headlength=10,
+                                     headaxislength=7)
+                
+                plt.title("Momentum-Corrected\nWhite = Significant Changes", color='white', pad=20)
+                plt.axis('off')
+                
+                # Difference magnitude (binary threshold)
+                plt.subplot(223)
+                diff_magnitude = np.sqrt(np.sum((momentum_dir_np - dir_xt_np)**2, axis=0))
+                significant_diff = diff_magnitude > np.mean(diff_magnitude)
+                plt.imshow(significant_diff, cmap='binary')
+                plt.title("Significant Differences\nWhite = Large Changes", color='white', pad=20)
+                plt.axis('off')
+                
+                # Combined difference visualization
+                plt.subplot(224)
+                U_diff = U_mom - U
+                V_diff = V_mom - V
+                diff_magnitude_local = np.sqrt(U_diff**2 + V_diff**2)
+                significant_diffs = diff_magnitude_local > np.mean(diff_magnitude_local)
+                
+                plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
+                # Plot significant differences in white
+                for i in range(len(X)):
+                    for j in range(len(Y)):
+                        if significant_diffs[i, j]:
+                            plt.quiver(X[i, j], Y[i, j], U_diff[i, j], V_diff[i, j],
+                                     color='white',
+                                     scale=10,
+                                     width=0.005,
+                                     headwidth=7,
+                                     headlength=10,
+                                     headaxislength=7)
+                
+                plt.title("Direction Differences\nWhite = Significant Changes", 
+                         color='white', pad=20)
+                plt.axis('off')
+                
+                # Save the analysis plot
+                save_path = os.path.join(vis_dir, f"direction_analysis_step_{timestep}_frame_{i}.png")
+                plt.tight_layout()
+                plt.savefig(save_path,
+                          bbox_inches='tight', dpi=150,
+                          facecolor='black', edgecolor='none')
+                plt.close()
+                
+                # Add momentum-corrected direction to pred_x0
+                pred_x0 = pred_x0 + momentum_corrected
+                
             prev_frame = pred_x0.detach()
             
             noise = sigma_t * noise_like(x.shape, device)
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-            
+
             # Apply conditioning using either DAVIS masks or attention/segmentation
-            if timestep <= 300:
-                if davis_masks is not None:
-                    # Use DAVIS mask directly
-                    mask = davis_masks[:, :, i, :, :]  # [H, W]
-                    mask = mask.unsqueeze(0)  # [1, 1, H, W]
-                    # Check if mask has any values of 1
-                    print(f"Mask shape: {mask.shape}")
-                    print(f"Mask min: {mask.min()}, max: {mask.max()}")
-                    print(f"Number of 1s in mask: {(mask > 0.5).sum().item()}")
-                  
-                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)  # [1, C, 1, 32, 32]
-                    
-                    # Apply the cond_image to the masked pred_x0 region
-                    if cond_image is None:
-                        cond_image = torch.zeros_like(pred_x0[:, :, 0])
-                    elif cond_image.shape[1] != pred_x0.shape[1]:
-                        if cond_image.shape[1] == 3:
-                            alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
-                            cond_image = torch.cat([cond_image, alpha_channel], dim=1)
-                        else:
-                            raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
-                    
-                    # Apply enhancement factor
-                    enhancement_factor = 1
-                    
-                    # Apply the mask with the properly sized conditioning image
-                    if mask.sum() != 0:
-                        pred_x0 = torch.where(
-                            mask.to(pred_x0.device) > 0.5,
-                            cond_image * enhancement_factor,
-                            pred_x0
-                        )   
-                else:
-                    # Use original attention/segmentation approach
-                    print("Using sam approach")
+            if davis_masks is not None and davis_masks.shape[2] > i:
+                # Use DAVIS mask directly
+                mask = davis_masks[:, :, i, :, :]  # [H, W]
+                mask = mask.unsqueeze(0)  # [1, 1, H, W]
+                mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)  # [1, C, 1, 32, 32]
+                
+                # Apply the cond_image to the masked pred_x0 region
+                if cond_image is None:
+                    cond_image = torch.zeros_like(pred_x0[:, :, 0])
+                elif cond_image.shape[1] != pred_x0.shape[1]:
+                    if cond_image.shape[1] == 3:
+                        alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
+                        cond_image = torch.cat([cond_image, alpha_channel], dim=1)
+                    else:
+                        raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
+                
+                # Apply enhancement factor based on timestep
+                enhancement_factor = 1.5 if timestep <= 300 else 1.0
+                
+                # Apply the mask with the properly sized conditioning image
+                if mask.sum() != 0:
+                    pred_x0 = torch.where(
+                        mask.to(pred_x0.device) > 0.5,
+                        cond_image * enhancement_factor,
+                        pred_x0
+                    )
+            else:
+                if timestep <= 300:
+                    # Use attention/segmentation approach
                     pred_x0, attention = self.apply_cond_img(
                         pred_x0, 
                         cond_image, 
                         target, 
                         i, 
                         pre_masks if not use_self_attention else getattr(self, 'previous_attention', None),
-                        use_self_attention=use_self_attention
+                        use_self_attention=use_self_attention,
                     )
                     
                     if use_self_attention:
                         self.previous_attention = attention
                     else:
                         pre_masks = attention
-                    
-                pred_x0 = (1-gamma) * pred_x0 + gamma * noise
+                
+            # Blend with noise
+            pred_x0 = (1-gamma) * pred_x0 + gamma * noise
+            
+            # Visualize the pred_x0
+            save_dir = "visualizations/pred_x0"
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Process tensor for visualization
+            vis_tensor = pred_x0.cpu().numpy()
+            if len(vis_tensor.shape) == 5:  # [B,C,T,H,W]
+                vis_tensor = vis_tensor[0, :, 0]  # Now [C,H,W]
+            elif len(vis_tensor.shape) == 4:  # [B,C,H,W]
+                vis_tensor = vis_tensor[0]  # Now [C,H,W]
+                
+            # Handle different channel configurations
+            if vis_tensor.shape[0] == 1:
+                vis_tensor = np.repeat(vis_tensor, 3, axis=0)
+            elif vis_tensor.shape[0] == 4:
+                vis_tensor = vis_tensor[:3]
+            elif vis_tensor.shape[0] != 3:
+                vis_tensor = vis_tensor[:3] if vis_tensor.shape[0] > 3 else np.pad(
+                    vis_tensor,
+                    ((0, 3 - vis_tensor.shape[0]), (0, 0), (0, 0)),
+                    mode='constant'
+                )
+            
+            # Transpose from [C,H,W] to [H,W,C]
+            vis_tensor = np.transpose(vis_tensor, (1, 2, 0))
+            
+            # Scale values to [0, 255] range
+            vis_tensor = ((vis_tensor + 1) * 127.5).clip(0, 255).astype(np.uint8)
+            
+            # Save the processed image
+            Image.fromarray(vis_tensor).save(f"{save_dir}/pred_x0_step_{timestep}_frame_{i}.png")
 
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
@@ -692,9 +846,57 @@ class DDIMSampler(object):
             # Apply enhancement factor
             enhancement_factor = 2
             # Apply the mask with the properly sized conditioning image
+            save_dir = "visualizations/masks"
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Process mask for visualization
+            mask_vis = mask.cpu().numpy()
+            if len(mask_vis.shape) == 4:  # [1,1,H,W]
+                mask_vis = mask_vis[0, 0]  # Now [H,W]
+                # Scale to [0, 255]
+                mask_vis = (mask_vis * 255).clip(0, 255).astype(np.uint8)
+            
+            # Save mask visualization
+            Image.fromarray(mask_vis).save(f"{save_dir}/mask_step_{step}.png")
+            
+            # Process conditional image for visualization only if it exists
+            if cond_image is not None:
+                cond_vis = cond_image.cpu().numpy()
+                
+                # Handle different dimensional cases
+                if len(cond_vis.shape) == 5:  # [B,C,T,H,W]
+                    cond_vis = cond_vis[0, :, 0]  # Take first batch and time step -> [C,H,W]
+                elif len(cond_vis.shape) == 4:  # [B,C,H,W]
+                    cond_vis = cond_vis[0]  # Take first batch -> [C,H,W]
+                elif len(cond_vis.shape) == 3:  # Already [C,H,W]
+                    pass
+                else:
+                    print(f"Warning: Unexpected cond_image shape: {cond_vis.shape}")
+                    cond_vis = None
+                
+                if cond_vis is not None:
+                    # Handle channels
+                    if cond_vis.shape[0] == 1:
+                        cond_vis = np.repeat(cond_vis, 3, axis=0)
+                    elif cond_vis.shape[0] == 4:
+                        cond_vis = cond_vis[:3]
+                    elif cond_vis.shape[0] != 3:
+                        cond_vis = cond_vis[:3] if cond_vis.shape[0] > 3 else np.pad(
+                            cond_vis,
+                            ((0, 3 - cond_vis.shape[0]), (0, 0), (0, 0)),
+                            mode='constant'
+                        )
+                    
+                    # Transpose and scale
+                    cond_vis = np.transpose(cond_vis, (1, 2, 0))
+                    cond_vis = ((cond_vis + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                    
+                    # Save conditional image visualization
+                    Image.fromarray(cond_vis).save(f"{save_dir}/cond_image_step_{step}.png")
+            
             modified_pred_x0 = torch.where(
                 mask.to(pred_x0.device) > 0.5,
-                cond_image * enhancement_factor,
+                cond_image * enhancement_factor if cond_image is not None else torch.zeros_like(pred_x0),
                 modified_pred_x0
             )
             
