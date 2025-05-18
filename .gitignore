@@ -3,7 +3,6 @@ results/
 
 # Un-cogvideo stuff
 .logs
-assets
 configs
 dcgm
 opensora_fifo
