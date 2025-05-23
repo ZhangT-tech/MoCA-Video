@@ -58,5 +58,5 @@ Thank for the community contrinutors for the code base:
 [Metrics Repo](https://github.com/JunyaoHu/common_metrics_on_video_quality)
 [FIFO Diffusion Pipeline](https://github.com/jjihwan/FIFO-Diffusion_public)
 [Grounded-SAM-2](https://github.com/IDEA-Research/Grounded-SAM-2)
-
+[AnimateDiffV2V Pipeline](https://huggingface.co/docs/diffusers/en/api/pipelines/animatediff#animatediffvideotovideopipeline)
 
