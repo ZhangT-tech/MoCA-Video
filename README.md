@@ -102,6 +102,8 @@ To run inference on your own videos:
 python videocrafter_main.py \
 ```
 
+The model can be run on a single NVIDIA V100 GPU with 32GB memory.
+
 Thank for the community contrinutors for the code base:
 [VideoCrafter Codebase](https://github.com/AILab-CVC/VideoCrafter) 
 [Baseline FreeBlend Repo](https://github.com/WiserZhou/FreeBlend) 
