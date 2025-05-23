@@ -22,33 +22,110 @@
 <div align="center">
 <table>
 <tr>
-<td>
-<img src="assets/results/mouse_cat.gif" width="400"/>
-<p><b>Mouse mixed with Cat</b></p>
-</td>
-<td>
-<img src="assets/results/cow_sheep.gif" width="400"/>
-<p><b>Cow mixed with Sheep</b></p>
-</td>
+<td colspan="3"><b>Mouse mixed with Cat</b></td>
 </tr>
 <tr>
 <td>
-<img src="assets/results/bird_cat.gif" width="400"/>
-<p><b>Bird mixed with Cat</b></p>
+<img src="assets/results/origin_mouse.gif" width="300"/>
+<p>Input Video</p>
 </td>
 <td>
-<img src="assets/results/horse_unicorn.gif" width="400"/>
-<p><b>Horse mixed with Unicorn</b></p>
+<img src="assets/results/cat.png" width="300"/>
+<p>Input Image</p>
 </td>
+<td>
+<img src="assets/results/mouse_cat.gif" width="300"/>
+<p>Output Video</p>
+</td>
+</tr>
+
+<tr>
+<td colspan="3"><b>Cow mixed with Sheep</b></td>
 </tr>
 <tr>
 <td>
-<img src="assets/results/surfer_kayak.gif" width="400"/>
-<p><b>Surfer mixed with Kayak</b></p>
+<img src="assets/results/cow_sheep.gif" width="300"/>
+<p>Input Video</p>
 </td>
 <td>
-<img src="assets/results/astronaut_cat.gif" width="400"/>
-<p><b>Astronaut mixed with Cat</b></p>
+<img src="assets/results/sheep.png" width="300"/>
+<p>Input Image</p>
+</td>
+<td>
+<img src="assets/results/cow_sheep.gif" width="300"/>
+<p>Output Video</p>
+</td>
+</tr>
+
+<tr>
+<td colspan="3"><b>Bird mixed with Cat</b></td>
+</tr>
+<tr>
+<td>
+<img src="assets/results/origin_bird.gif" width="300"/>
+<p>Input Video</p>
+</td>
+<td>
+<img src="assets/results/cat.png" width="300"/>
+<p>Input Image</p>
+</td>
+<td>
+<img src="assets/results/bird_cat.gif" width="300"/>
+<p>Output Video</p>
+</td>
+</tr>
+
+<tr>
+<td colspan="3"><b>Horse mixed with Unicorn</b></td>
+</tr>
+<tr>
+<td>
+<img src="assets/results/origin_horse.gif" width="300"/>
+<p>Input Video</p>
+</td>
+<td>
+<img src="assets/results/unicorn.jpg" width="300"/>
+<p>Input Image</p>
+</td>
+<td>
+<img src="assets/results/horse_unicorn.gif" width="300"/>
+<p>Output Video</p>
+</td>
+</tr>
+
+<tr>
+<td colspan="3"><b>Surfer mixed with Kayak</b></td>
+</tr>
+<tr>
+<td>
+<img src="assets/results/surfer_kayak.gif" width="300"/>
+<p>Input Video</p>
+</td>
+<td>
+<img src="assets/results/kayak.jpg" width="300"/>
+<p>Input Image</p>
+</td>
+<td>
+<img src="assets/results/surfer_kayak.gif" width="300"/>
+<p>Output Video</p>
+</td>
+</tr>
+
+<tr>
+<td colspan="3"><b>Astronaut mixed with Cat</b></td>
+</tr>
+<tr>
+<td>
+<img src="assets/results/origin_astronaut.gif" width="300"/>
+<p>Input Video</p>
+</td>
+<td>
+<img src="assets/results/cat.png" width="300"/>
+<p>Input Image</p>
+</td>
+<td>
+<img src="assets/results/astronaut_cat.gif" width="300"/>
+<p>Output Video</p>
 </td>
 </tr>
 </table>
