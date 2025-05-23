@@ -78,7 +78,7 @@ cd MoCA-Video
 
 ```bash
 # Create and activate conda environment
-conda create -n moca python=3.8
+conda create -n moca python=3.10
 conda activate moca
 
 # Install dependencies
