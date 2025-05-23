@@ -38,10 +38,11 @@
 
 ### Quantitative Results
 
-Our method achieves superior performance across multiple metrics:
+Our method achieves superior performance across multiple metrics both quantatively and qualitatively:
 
 <div align="center">
-<img src="assets/results/metrics.png" width="800"/>
+<img src="assets/results/metric.png" width="800"/>
+<img src="assets/results/user_study.png" width="800"/>
 </div>
 
 ---
