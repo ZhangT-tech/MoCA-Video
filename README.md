@@ -3,7 +3,7 @@
 <div align="center">
 
 <p>
-🚀 **Training-free** &nbsp;&nbsp;&nbsp;&nbsp; 🎨 **Semantic Mixing**
+🚀 Training-free &nbsp;&nbsp;&nbsp;&nbsp; 🎨 Semantic Mixing
 </p>
 
 </div>
