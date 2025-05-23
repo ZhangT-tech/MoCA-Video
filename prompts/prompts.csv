@@ -95,3 +95,6 @@ prompt,conditioned_object,conditioned_image_path,conditioned_prompt,gamma
 "A tractor working in golden wheat fields",tractor,"assets/harvester.jpg","the condition is a harvester",2
 "A delivery truck on a busy highway",truck,"assets/van.jpg","the condition is a van",2
 "A wheelchair moving through hospital halls",wheelchair,"assets/stroller.jpg","the condition is a stroller",2
+"A classic car parked in a parking lot",car,"assets/motorcycle.jpg","the condition is a motorcycle",2
+"A clock ticking on a mantelpiece",clock,"assets/orange.jpg","the condition is an orange",2
+"A vintage motorcycle parked in a garage",motorcycle,"assets/bicycle.jpg","the condition is a bicycle",2
