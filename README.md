@@ -12,7 +12,7 @@
 
 ## 📽️ Teaser  
 <!-- insert teaser GIF or static images here -->
-[Teaser Preview](assets/illustration/teaser.pdf)
+[![Teaser Preview](assets/illustration/teaser.png)](assets/illustration/teaser.pdf)
 ---
 
 ## 🎥 Video Results
