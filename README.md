@@ -22,16 +22,34 @@
 <div align="center">
 <table>
 <tr>
-<td><img src="assets/results/mouse_cat.gif" width="400"/></td>
-<td><img src="assets/results/cow_sheep.gif" width="400"/></td>
+<td>
+<img src="assets/results/mouse_cat.gif" width="400"/>
+<p><b>Mouse mixed with Cat</b></p>
+</td>
+<td>
+<img src="assets/results/cow_sheep.gif" width="400"/>
+<p><b>Cow mixed with Sheep</b></p>
+</td>
 </tr>
 <tr>
-<td><img src="assets/results/bird_cat.gif" width="400"/></td>
-<td><img src="assets/results/horse_unicorn.gif" width="400"/></td>
+<td>
+<img src="assets/results/bird_cat.gif" width="400"/>
+<p><b>Bird mixed with Cat</b></p>
+</td>
+<td>
+<img src="assets/results/horse_unicorn.gif" width="400"/>
+<p><b>Horse mixed with Unicorn</b></p>
+</td>
 </tr>
 <tr>
-<td><img src="assets/results/surfer_kayak.gif" width="400"/></td>
-<td><img src="assets/results/astronaut_cat.gif" width="400"/></td>
+<td>
+<img src="assets/results/surfer_kayak.gif" width="400"/>
+<p><b>Surfer mixed with Kayak</b></p>
+</td>
+<td>
+<img src="assets/results/astronaut_cat.gif" width="400"/>
+<p><b>Astronaut mixed with Cat</b></p>
+</td>
 </tr>
 </table>
 </div>
