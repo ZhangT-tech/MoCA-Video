@@ -15,6 +15,37 @@
 [![Teaser Preview](assets/illustration/teaser.png)](assets/illustration/teaser.pdf)
 ---
 
+## 🎥 Video Results
+
+### Qualitative Results
+
+<div align="center">
+<table>
+<tr>
+<td><img src="assets/results/mouse_cat.gif" width="400"/></td>
+<td><img src="assets/results/cow_sheep.gif" width="400"/></td>
+</tr>
+<tr>
+<td><img src="assets/results/bird_cat.gif" width="400"/></td>
+<td><img src="assets/results/horse_unicorn.gif" width="400"/></td>
+</tr>
+<tr>
+<td><img src="assets/results/surfer_kayak.gif" width="400"/></td>
+<td><img src="assets/results/astronaut_cat.gif" width="400"/></td>
+</tr>
+</table>
+</div>
+
+### Quantitative Results
+
+Our method achieves superior performance across multiple metrics:
+
+<div align="center">
+<img src="assets/results/metrics.png" width="800"/>
+</div>
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Clone This Repository  
