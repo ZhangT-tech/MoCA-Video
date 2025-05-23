@@ -44,7 +44,7 @@
 </tr>
 <tr>
 <td>
-<img src="assets/results/cow_sheep.gif" width="300"/>
+<img src="assets/results/origin_cow.gif" width="300"/>
 <p>Input Video</p>
 </td>
 <td>
@@ -98,7 +98,7 @@
 </tr>
 <tr>
 <td>
-<img src="assets/results/surfer_kayak.gif" width="300"/>
+<img src="assets/results/origin_surfer.gif" width="300"/>
 <p>Input Video</p>
 </td>
 <td>
