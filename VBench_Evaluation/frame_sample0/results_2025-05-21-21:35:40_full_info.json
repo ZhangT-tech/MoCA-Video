@@ -1,0 +1,80 @@
+[
+    {
+        "prompt_en": "tmpvqvzt8jg",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpvqvzt8jg.mp4"
+        ]
+    },
+    {
+        "prompt_en": "tmpq9yscguo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpq9yscguo.mp4"
+        ]
+    },
+    {
+        "prompt_en": "tmp_7lah2d0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmp_7lah2d0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "tmplcuk5xhr",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmplcuk5xhr.mp4"
+        ]
+    },
+    {
+        "prompt_en": "tmpfx7vh_ds",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpfx7vh_ds.mp4"
+        ]
+    },
+    {
+        "prompt_en": "tmpo27kxneu",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpo27kxneu.mp4"
+        ]
+    }
+]

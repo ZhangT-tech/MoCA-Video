@@ -1,0 +1,34 @@
+[
+    {
+        "prompt_en": "tmpheffl28g",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-0.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-1.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-2.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-3.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-4.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-5.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-6.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-7.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-8.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-9.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-10.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-11.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-12.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-13.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-14.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-15.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-16.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-17.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-18.mp4",
+            "/tmp/tmp4x0b3d5y/tmpheffl28g-19.mp4"
+        ]
+    }
+]

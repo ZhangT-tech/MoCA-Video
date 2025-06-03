@@ -1,0 +1,80 @@
+[
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/animation.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/origin.mp4"
+        ]
+    },
+    {
+        "prompt_en": "frame_sample0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/frame_sample0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/animation.gif"
+        ]
+    },
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/fifo.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A bird is perched on a tree branch, 4K, High quality/origin.gif"
+        ]
+    }
+]

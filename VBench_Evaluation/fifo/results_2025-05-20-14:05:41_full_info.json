@@ -1,0 +1,28 @@
+[
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Composition",
+            "Motion_Rationality",
+            "Instance_Preservation",
+            "Dynamic_Spatial_Relationship",
+            "Dynamic_Attribute",
+            "Motion_Order_Understanding",
+            "Human_Interaction",
+            "Complex_Landscape",
+            "Complex_Plot",
+            "Camera_Motion",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Mechanics",
+            "Thermotics",
+            "Material",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/An astronaut floating in space, high quality, 4K resolution/fifo.mp4"
+        ]
+    }
+]

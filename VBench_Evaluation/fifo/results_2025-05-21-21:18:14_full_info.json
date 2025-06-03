@@ -1,0 +1,34 @@
+[
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmp3tji3vjn/fifo-0.mp4",
+            "/tmp/tmp3tji3vjn/fifo-1.mp4",
+            "/tmp/tmp3tji3vjn/fifo-2.mp4",
+            "/tmp/tmp3tji3vjn/fifo-3.mp4",
+            "/tmp/tmp3tji3vjn/fifo-4.mp4",
+            "/tmp/tmp3tji3vjn/fifo-5.mp4",
+            "/tmp/tmp3tji3vjn/fifo-6.mp4",
+            "/tmp/tmp3tji3vjn/fifo-7.mp4",
+            "/tmp/tmp3tji3vjn/fifo-8.mp4",
+            "/tmp/tmp3tji3vjn/fifo-9.mp4",
+            "/tmp/tmp3tji3vjn/fifo-10.mp4",
+            "/tmp/tmp3tji3vjn/fifo-11.mp4",
+            "/tmp/tmp3tji3vjn/fifo-12.mp4",
+            "/tmp/tmp3tji3vjn/fifo-13.mp4",
+            "/tmp/tmp3tji3vjn/fifo-14.mp4",
+            "/tmp/tmp3tji3vjn/fifo-15.mp4",
+            "/tmp/tmp3tji3vjn/fifo-16.mp4",
+            "/tmp/tmp3tji3vjn/fifo-17.mp4",
+            "/tmp/tmp3tji3vjn/fifo-18.mp4",
+            "/tmp/tmp3tji3vjn/fifo-19.mp4"
+        ]
+    }
+]

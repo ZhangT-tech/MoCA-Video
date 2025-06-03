@@ -1,0 +1,34 @@
+[
+    {
+        "prompt_en": "tmp3j46ahrb",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-0.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-1.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-2.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-3.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-4.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-5.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-6.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-7.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-8.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-9.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-10.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-11.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-12.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-13.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-14.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-15.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-16.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-17.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-18.mp4",
+            "/tmp/tmp59tzn43u/tmp3j46ahrb-19.mp4"
+        ]
+    }
+]

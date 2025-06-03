@@ -1,0 +1,80 @@
+[
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/fifo.mp4"
+        ]
+    },
+    {
+        "prompt_en": "frame_sample0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/frame_sample0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/animation.gif"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/origin.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/origin.gif"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A motocross rider performing jumps on a dirt track/motorcycle.jpg/animation.mp4"
+        ]
+    }
+]

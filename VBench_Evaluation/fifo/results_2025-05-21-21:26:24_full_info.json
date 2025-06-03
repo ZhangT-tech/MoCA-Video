@@ -1,0 +1,130 @@
+[
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-0.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-1.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-2.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-3.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-4.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-5.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-6.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-7.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-8.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-9.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-10.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-11.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-12.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-13.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-14.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-15.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-16.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-17.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-18.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation-19.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-0.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-1.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-2.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-3.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-4.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-5.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-6.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-7.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-8.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-9.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-10.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-11.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-12.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-13.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-14.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-15.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-16.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-17.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-18.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin-19.mp4"
+        ]
+    },
+    {
+        "prompt_en": "frame_sample0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-0.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-1.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-2.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-3.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-4.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-5.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-6.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-7.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-8.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-9.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-10.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-11.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-12.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-13.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-14.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-15.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-16.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-17.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-18.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0-19.mp4"
+        ]
+    },
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-0.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-1.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-2.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-3.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-4.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-5.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-6.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-7.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-8.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-9.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-10.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-11.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-12.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-13.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-14.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-15.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-16.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-17.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-18.mp4",
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo-19.mp4"
+        ]
+    }
+]

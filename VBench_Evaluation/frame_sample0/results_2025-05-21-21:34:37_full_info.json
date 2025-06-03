@@ -1,0 +1,80 @@
+[
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/animation.mp4"
+        ]
+    },
+    {
+        "prompt_en": "frame_sample0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/frame_sample0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/animation.gif"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/origin.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/origin.gif"
+        ]
+    },
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A construction worker in a hard hat operating heavy machinery/fifo.mp4"
+        ]
+    }
+]

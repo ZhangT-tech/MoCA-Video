@@ -1,0 +1,80 @@
+[
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin.gif"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation.mp4"
+        ]
+    },
+    {
+        "prompt_en": "origin",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/origin.mp4"
+        ]
+    },
+    {
+        "prompt_en": "frame_sample0",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/frame_sample0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "animation",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/animation.gif"
+        ]
+    },
+    {
+        "prompt_en": "fifo",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "user-study-samples/A cow with a bell grazing in a green pasture/sheep.jpg/fifo.mp4"
+        ]
+    }
+]

@@ -1,0 +1,28 @@
+[
+    {
+        "prompt_en": "video",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpqry5vjhx/video.mp4"
+        ]
+    },
+    {
+        "prompt_en": "input",
+        "dimension": [
+            "Diversity",
+            "Human_Anatomy",
+            "Human_Identity",
+            "Human_Clothes",
+            "Multi-View_Consistency"
+        ],
+        "video_list": [
+            "/tmp/tmpqry5vjhx/input.mp4"
+        ]
+    }
+]

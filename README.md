@@ -189,3 +189,19 @@ Thank for the community contrinutors for the code base:
 [Grounded-SAM-2](https://github.com/IDEA-Research/Grounded-SAM-2)
 [AnimateDiffV2V Pipeline](https://huggingface.co/docs/diffusers/en/api/pipelines/animatediff#animatediffvideotovideopipeline)
 
+## 📝 Citation
+
+If you find our work useful for your research, please cite our paper:
+
+```bibtex
+@misc{zhang2025motionawareconceptalignmentconsistent,
+      title={Motion-Aware Concept Alignment for Consistent Video Editing}, 
+      author={Tong Zhang and Juan C Leon Alcazar and Bernard Ghanem},
+      year={2025},
+      eprint={2506.01004},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2506.01004}
+}
+```
+
