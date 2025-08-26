@@ -13,6 +13,7 @@ videocrafter_models/
 zeroscope_models/
 opensoraplan_models/
 
+
 # venvs
 .fifo
 .sora
@@ -43,3 +44,12 @@ Grounded-SAM-2/
 FreeBlend/
 datasets
 *.sh
+I2VEdit/
+RAVE/
+TokenFlow/
+rebuttals*
+*.txt
+multi*
+convert_frames*
+check_missing*
+VBench

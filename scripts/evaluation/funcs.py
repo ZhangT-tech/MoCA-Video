@@ -241,7 +241,7 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,
     return batch_images, ddim_sampler, samples
 
 def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
-                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image=None, targets=None, gamma=0.5, use_self_attention=False, davis_data=None, anchor_frame=None, **kwargs):
+                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image=None, targets=None, gamma=0.5, davis_data=None, anchor_frame=None, experiment_condition="baseline", **kwargs):
     batch_size = noise_shape[0]
     kwargs.update({"clean_cond": True})
     ## Obtain the target
@@ -328,8 +328,8 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                     cond_image=conditioned_image,
                     target=target,
                     gamma=gamma,
-                    use_self_attention=use_self_attention,
                     davis_masks=input_masks,  # Pass DAVIS masks
+                    experiment_condition=experiment_condition,
                     **kwargs
                 )
             else:
@@ -343,8 +343,7 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                     unconditional_conditioning=uc,
                     cond_image=conditioned_image,
                     target=target,
-                    gamma=gamma,
-                    use_self_attention=use_self_attention,
+                    gamma=gamma,    
                     **kwargs
                 )
 
