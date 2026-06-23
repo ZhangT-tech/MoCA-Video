@@ -9,6 +9,7 @@ try:
     XFORMERS_IS_AVAILBLE = True
 except:
     XFORMERS_IS_AVAILBLE = False
+from contextlib import contextmanager
 from lvdm.common import (
     checkpoint,
     exists,
@@ -40,9 +41,137 @@ class RelativePosition(nn.Module):
         return embeddings
 
 
+class CrossAttentionMapExtractor:
+    """
+    Extracts cross-attention maps from SpatialTransformer layers by temporarily
+    injecting recording into CrossAttention.forward/efficient_forward.
+
+    Usage:
+        extractor = CrossAttentionMapExtractor()
+        extractor.register(unet_model)
+        with extractor.capture():
+            # ... run UNet forward pass ...
+            pass
+        mask = extractor.get_concept_mask(target_token_indices, h, w)
+    """
+
+    # Class-level flag checked by CrossAttention during forward
+    _active_extractor = None
+
+    def __init__(self):
+        self.captured_maps = []
+
+    def register(self, model):
+        """No-op — recording is controlled via class-level flag, not hooks."""
+        pass
+
+    def clear(self):
+        self.captured_maps.clear()
+
+    def record(self, sim, h, w, heads):
+        """Called by CrossAttention.forward to record an attention map."""
+        # sim: (B*H, spatial, seq_len) — already softmaxed
+        self.captured_maps.append((h, w, sim.detach().cpu()))
+
+    @contextmanager
+    def capture(self):
+        """Context manager to enable attention map recording during UNet forward."""
+        CrossAttentionMapExtractor._active_extractor = self
+        self.clear()
+        try:
+            yield self
+        finally:
+            CrossAttentionMapExtractor._active_extractor = None
+
+    def get_concept_mask(self, token_indices, target_h, target_w, threshold=0.3,
+                         strategy="relative_threshold", topk_ratio=0.2, std_scale=1.0, max_components=1):
+        """
+        Aggregate cross-attention maps for specific token indices into a spatial mask.
+
+        Args:
+            token_indices: list of int, indices of the target concept's tokens in the text sequence
+            target_h, target_w: desired output mask dimensions
+            threshold: threshold used by relative_threshold and absolute strategies
+            strategy: hard masking rule: relative_threshold, topk, mean_std, largest_component, absolute, or soft
+            topk_ratio: fraction of strongest pixels to keep for topk strategy
+            std_scale: multiplier for mean_std threshold
+            max_components: number of connected components to keep for largest_component
+
+        Returns:
+            torch.Tensor: mask of shape (1, 1, target_h, target_w) on CPU
+        """
+        if not self.captured_maps or not token_indices:
+            return None
+
+        aggregated = torch.zeros(target_h, target_w)
+        total_weight = 0.0
+
+        for (h, w, attn_map) in self.captured_maps:
+            # attn_map: (B*H, spatial, seq_len)
+            valid_indices = [i for i in token_indices if i < attn_map.shape[-1]]
+            if not valid_indices:
+                continue
+            # Extract attention to target tokens and average over heads
+            token_attn = attn_map[:, :, valid_indices].mean(dim=(0, 2))  # (spatial,)
+            # Reshape to spatial and resize
+            spatial_map = token_attn.reshape(h, w)
+            resized = F.interpolate(
+                spatial_map.unsqueeze(0).unsqueeze(0).float(),
+                size=(target_h, target_w),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze()
+            # Weight by spatial resolution — higher-res layers get more weight
+            weight = h * w
+            aggregated += resized * weight
+            total_weight += weight
+
+        if total_weight == 0:
+            return None
+
+        aggregated /= total_weight
+        # Normalize to [0, 1]
+        if aggregated.max() > aggregated.min():
+            aggregated = (aggregated - aggregated.min()) / (aggregated.max() - aggregated.min())
+        if strategy == "soft":
+            mask = aggregated.float()
+        elif strategy == "topk":
+            flat = aggregated.flatten()
+            ratio = min(max(float(topk_ratio), 0.0), 1.0)
+            k = max(1, int(round(flat.numel() * ratio)))
+            topk_threshold = torch.topk(flat, k).values[-1]
+            mask = (aggregated >= topk_threshold).float()
+        elif strategy == "mean_std":
+            adaptive_threshold = aggregated.mean() + float(std_scale) * aggregated.std(unbiased=False)
+            mask = (aggregated > adaptive_threshold).float()
+        elif strategy == "largest_component":
+            import cv2
+            flat = aggregated.flatten()
+            ratio = min(max(float(topk_ratio), 0.0), 1.0)
+            k = max(1, int(round(flat.numel() * ratio)))
+            topk_threshold = torch.topk(flat, k).values[-1]
+            candidate = (aggregated >= topk_threshold).cpu().numpy().astype("uint8")
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+            if num_labels <= 1:
+                mask = torch.from_numpy(candidate).float()
+            else:
+                keep = max(1, int(max_components))
+                component_areas = stats[1:, cv2.CC_STAT_AREA]
+                keep_labels = 1 + component_areas.argsort()[-keep:]
+                mask = torch.from_numpy(np.isin(labels, keep_labels).astype("uint8")).float()
+        elif strategy == "absolute":
+            mask = (aggregated > threshold).float()
+        elif strategy == "relative_threshold":
+            mask = (aggregated > threshold).float()
+        else:
+            raise ValueError(f"Unknown concept mask strategy: {strategy}")
+
+        return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+
+
 class CrossAttention(nn.Module):
 
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., 
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.,
                  relative_position=False, temporal_length=None, img_cross_attention=False):
         super().__init__()
         inner_dim = dim_head * heads
@@ -127,6 +256,7 @@ class CrossAttention(nn.Module):
         return self.to_out(out)
     
     def efficient_forward(self, x, context=None, mask=None):
+        is_cross_attn = context is not None
         q = self.to_q(x)
         context = default(context, x)
 
@@ -152,6 +282,33 @@ class CrossAttention(nn.Module):
         )
         # actually compute the attention, what we cannot get enough of
         out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=None)
+
+        # Record cross-attention map for ConceptAttention masking (only when active)
+        extractor = CrossAttentionMapExtractor._active_extractor
+        if extractor is not None and is_cross_attn:
+            with torch.no_grad():
+                spatial_len = q.shape[1]
+                # Skip coarse layers — they blur the mask when upsampled
+                min_spatial = 16 * 20  # Only record layers with >= 20x16 resolution
+                if spatial_len >= min_spatial:
+                    # Only use the CONDITIONED half of the batch (first half)
+                    # With batched CFG, q/k have shape (2*B*H, spatial, dim)
+                    n_heads = self.heads
+                    half = q.shape[0] // 2  # conditioned branch = first half
+                    q_cond = q[:half]
+                    k_cond = k[:half]
+
+                    sim = torch.einsum('b i d, b j d -> b i j', q_cond, k_cond) * self.scale
+                    attn_probs = sim.softmax(dim=-1)  # (B*H, spatial, seq_len)
+
+                    for rh, rw in [(10, 16), (16, 10), (20, 32), (32, 20), (40, 64), (64, 40)]:
+                        if rh * rw == spatial_len:
+                            extractor.record(attn_probs, rh, rw, n_heads)
+                            break
+                    else:
+                        hw = int(spatial_len ** 0.5)
+                        if hw * hw == spatial_len:
+                            extractor.record(attn_probs, hw, hw, n_heads)
 
         ## considering image token additionally
         if context is not None and self.img_cross_attention:

@@ -1,6 +1,8 @@
 import numpy as np
 from tqdm import tqdm
 import torch
+import time
+from collections import defaultdict
 from lvdm.models.utils_diffusion import make_ddim_sampling_parameters, make_ddim_timesteps
 from lvdm.common import noise_like
 import os
@@ -10,6 +12,39 @@ from pathlib import Path
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 import torch.nn.functional as F
 import logging
+
+
+class ProfilingTimer:
+    """Lightweight GPU-aware profiling timer for denoising steps."""
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.timings = defaultdict(list)
+        self._start_events = {}
+
+    def start(self, name):
+        if not self.enabled:
+            return
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        self._start_events[name] = (start, end)
+
+    def stop(self, name):
+        if not self.enabled or name not in self._start_events:
+            return
+        start, end = self._start_events.pop(name)
+        end.record()
+        torch.cuda.synchronize()
+        self.timings[name].append(start.elapsed_time(end))  # milliseconds
+
+    def summary(self):
+        lines = ["\n=== Denoising Profiling Summary ==="]
+        for name, times in sorted(self.timings.items()):
+            total = sum(times)
+            avg = total / len(times)
+            lines.append(f"  {name}: {total:.1f}ms total, {avg:.1f}ms avg, {len(times)} calls")
+        lines.append("=" * 40)
+        return "\n".join(lines)
 logging.getLogger().setLevel(logging.ERROR)  # Only show ERROR messages
 logging.disable(logging.INFO)
 logging.disable(logging.DEBUG)
@@ -34,26 +69,47 @@ class DDIMSampler(object):
     """
     Perform DDIM sampling using a diffusion model.
     """
-    def __init__(self, model, schedule="linear", use_self_attention=False, **kwargs):
+    def __init__(self, model, schedule="linear", use_self_attention=False, experiment_condition=None, **kwargs):
         super().__init__()
         self.model = model # DDIM model
         self.ddpm_num_timesteps = model.num_timesteps
-        self.schedule = schedule 
+        self.schedule = schedule
         self.counter = 0
         self.use_self_attention = use_self_attention
         self.vis_helper = VisualizationHelper()
-        
+
         # Initialize models only if needed
         self.sam2_model = None
         self.sam2_predictor = None
         self.processor = None
         self.grounding_model = None
-        
+
         # Flag to control model initialization
         self.models_initialized = False
-        
-        # Initialize models based on self-attention flag
-        if not use_self_attention:
+
+        # Profiling timer (set enabled=True to measure bottlenecks)
+        self.profiler = ProfilingTimer(enabled=False)
+
+        # Segmentation caching: reuse masks when IOU is high
+        self._cached_text_inputs = None
+        self._cached_text_target = None
+        self._cached_mask = None
+        self._mask_iou_skip_threshold = 0.85  # Skip segmentation if mask IOU > threshold
+
+        # ConceptAttention-based masking (lightweight alternative to SAM2+GDINO)
+        self._concept_attn_extractor = None
+        self._concept_token_indices = None
+        self._concept_attn_target = None
+        self._concept_mask_strategy = "relative_threshold"
+        self._concept_mask_threshold = 0.3
+        self._concept_mask_topk_ratio = 0.2
+        self._concept_mask_std_scale = 1.0
+        self._concept_mask_max_components = 1
+
+        # Initialize based on experiment condition
+        if experiment_condition == "concept_attention":
+            self.initialize_concept_attention()
+        elif not use_self_attention:
             self.initialize_segmentation_models()
             
 
@@ -217,16 +273,8 @@ class DDIMSampler(object):
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
             
-        # Store the intermediate results during sampling
-        # x_inter: it stores the intermediate states of the latent variable x at each timestep during the reverse diffusion process
-        # pred_x0: it stores the model's prediction of the original data at each timestep, which is an estimate of the clean data corresponding to the latent variable x
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
 
-        # reversed(range(0, timesteps)): 9, 8, 7, ..., 0
-        # np.flip is used when timesteps is an array specifying the exact timesteps to sample
-        # if timesteps  = np.array([0, 2, 4, 6, 8, 10]), the reversed order using np.flip is 10, 8, 6, 4, 2, 0
-        # when timesteps is an array, which means the model will perform denoising only at steps 0, 2, 4, 6, 8, 10
-        # there are the points in the reverse diffusion process where the model will generate intermediate states leading to the final sample
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         if verbose:
@@ -260,21 +308,38 @@ class DDIMSampler(object):
 
     @torch.no_grad()
     def fifo_onestep(self, cond, shape, latents=None, timesteps=None, indices=None,
-                     unconditional_guidance_scale=1., unconditional_conditioning=None, 
+                     unconditional_guidance_scale=1., unconditional_conditioning=None,
                      cond_image=None, target=None, use_self_attention=False,
-                     davis_masks=None, experiment_condition="baseline", **kwargs):
-        device = self.model.betas.device        
+                     davis_masks=None, experiment_condition="baseline",
+                     cond_original=None, mixing_strength=0.3, **kwargs):
+        device = self.model.betas.device
         b, _, f, _, _ = shape
-        ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long) # [16]
-        noise_pred = self.unet(latents, cond, ts,
-                                unconditional_guidance_scale=unconditional_guidance_scale,
-                                unconditional_conditioning=unconditional_conditioning,
-                                **kwargs) # torch.Size([1, 4, 16, 40, 64])
-        
-        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts, 
+        ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long)
+
+        # Enable attention map capture for concept_attention mode
+        use_concept_attn = (experiment_condition == "concept_attention" and
+                            self._concept_attn_extractor is not None)
+
+        self.profiler.start("unet_forward")
+        if use_concept_attn:
+            with self._concept_attn_extractor.capture():
+                noise_pred = self.unet(latents, cond, ts,
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        unconditional_conditioning=unconditional_conditioning,
+                                        **kwargs)
+        else:
+            noise_pred = self.unet(latents, cond, ts,
+                                    unconditional_guidance_scale=unconditional_guidance_scale,
+                                    unconditional_conditioning=unconditional_conditioning,
+                                    **kwargs)
+        self.profiler.stop("unet_forward")
+
+        self.profiler.start("ddim_step")
+        latents, pred_x0 = self.ddim_step(latents, noise_pred, indices, cond_image, target, ts,
                                         use_self_attention=use_self_attention,
                                         davis_masks=davis_masks,
                                         experiment_condition=experiment_condition)
+        self.profiler.stop("ddim_step")
 
         return latents, pred_x0
 
@@ -369,13 +434,36 @@ class DDIMSampler(object):
     @torch.no_grad()
     def unet(self, x, c, t, unconditional_guidance_scale=1.,
              unconditional_conditioning=None, **kwargs):
-        
+
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             e_t = self.model.apply_model(x, t, c, **kwargs) # unet denoiser
         else:
-            e_t = self.model.apply_model(x, t, c, **kwargs)
-            e_t_uncond = self.model.apply_model(x, t, unconditional_conditioning, **kwargs)
-            
+            # Batch conditioned and unconditioned into a single forward pass
+            x_combined = torch.cat([x, x], dim=0)
+            t_combined = torch.cat([t, t], dim=0)
+
+            # Merge conditioning dicts along batch dimension
+            if isinstance(c, dict):
+                c_combined = {}
+                for key in c:
+                    if key == 'fps':
+                        # fps is a 1D tensor [B] that broadcasts with emb — just keep as-is
+                        # since both cond and uncond use the same fps value
+                        c_combined[key] = c[key]
+                    elif isinstance(c[key], list):
+                        c_combined[key] = [torch.cat([c_val, uc_val], dim=0)
+                                           for c_val, uc_val in zip(c[key], unconditional_conditioning[key])]
+                    elif isinstance(c[key], torch.Tensor):
+                        c_combined[key] = torch.cat([c[key], unconditional_conditioning[key]], dim=0)
+                    else:
+                        c_combined[key] = c[key]
+            else:
+                c_combined = [torch.cat([c_val, uc_val], dim=0)
+                              for c_val, uc_val in zip(c, unconditional_conditioning)]
+
+            e_t_combined = self.model.apply_model(x_combined, t_combined, c_combined, **kwargs)
+            e_t, e_t_uncond = e_t_combined.chunk(2, dim=0)
+
             # text cfg
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
@@ -418,236 +506,162 @@ class DDIMSampler(object):
             a_prev = torch.full(size, alphas_prev[index], device=device)
             sigma_t = torch.full(size, sigmas[index], device=device)
             sqrt_one_minus_at = torch.full(size, sqrt_one_minus_alphas[index],device=device)
-            
+
             # Current prediction for x_0
             pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-            
+
             # Direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+             # x_prev uses momentum-corrected pred_x0 (clean denoising trajectory)
+            
             noise = sigma_t * noise_like(x.shape, device)
-            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+            
 
             # Calculate motion gradient if we have a previous frame
             if prev_frame is not None:
-                motion_gradient = pred_x0 - prev_frame 
-                motion_gradient = motion_gradient + 1.5 * dir_xt # TODO: Experiment with different values # 0.05, 0.1, 0.2 1, 1.5, 2
+                motion_gradient = pred_x0 - prev_frame
+                motion_gradient = motion_gradient + 0.05 * dir_xt
+                mg = motion_gradient
+                if mg.dim() == 4:
+                    mg = mg.unsqueeze(2)
                 self.momentum[:, :, [i]] = (
-                    self.beta * self.momentum[:, :, [i-1]] + 
-                    (1 - self.beta) * motion_gradient
+                    self.beta * self.momentum[:, :, [i-1]] +
+                    (1 - self.beta) * mg
                 )
-                correction_strength = 2 * (1.0 - timestep / 1000.0)
-                momentum_corrected = correction_strength * self.momentum[:, :, [i]]
+                correction_strength = 0.1 * (1.0 - timestep / 1000.0)
+                pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
                 
-                # # Normalize directions for visualization
-                # momentum_corrected_dir = correction_strength * self.momentum[:, :, [i]] + dir_xt
-                # dir_xt_norm = dir_xt / (dir_xt.abs().max() + 1e-8)
-                # momentum_corrected_dir_norm = momentum_corrected_dir / (momentum_corrected_dir.abs().max() + 1e-8)
-                
-                # # Convert to numpy and extract first 2 channels for direction visualization
-                # dir_xt_np = dir_xt_norm[:, :2, 0].cpu().numpy()[0]  # [2,H,W]
-                # momentum_dir_np = momentum_corrected_dir_norm[:, :2, 0].cpu().numpy()[0]  # [2,H,W]
-                
-                # # Get latent for visualization (first 3 channels)
-                # latent_vis = x[:, :3, 0].cpu().numpy()[0]  # [C,H,W]
-                # latent_vis = np.transpose(latent_vis, (1, 2, 0))  # [H,W,C]
-                # latent_vis = ((latent_vis + 1) * 127.5).clip(0, 255).astype(np.uint8)
-                
-                # # Calculate differences between original and momentum-corrected directions
-                # diff_magnitude = np.sqrt(np.sum((momentum_dir_np - dir_xt_np)**2, axis=0))
-                # angle_diff = np.arctan2(momentum_dir_np[1], momentum_dir_np[0]) - np.arctan2(dir_xt_np[1], dir_xt_np[0])
-                # angle_diff = np.rad2deg(angle_diff)  # Convert to degrees
-                
-                # # Create visualization directory
-                # vis_dir = "visualizations/directions"
-                # os.makedirs(vis_dir, exist_ok=True)
-                
-                # # Create figure with subplots
-                # plt.figure(figsize=(20, 15))
-                # plt.style.use('dark_background')
-                
-                # # Process latent for visualization
-                # latent_vis = pred_x0[:, :3, 0].cpu().numpy()[0]  # [C,H,W]
-                # # Convert latent to grayscale by taking mean across channels
-                # latent_vis = np.mean(latent_vis, axis=0)  # [H,W]
-                # # Normalize to [0, 255]
-                # latent_vis = ((latent_vis - latent_vis.min()) / (latent_vis.max() - latent_vis.min()) * 255).astype(np.uint8)
-                
-                # # Direction vector field (Original)
-                # plt.subplot(221)
-                # Y, X = np.mgrid[0:dir_xt_np.shape[1]:4, 0:dir_xt_np.shape[2]:4]
-                # U = dir_xt_np[0, ::4, ::4]
-                # V = dir_xt_np[1, ::4, ::4]
-                
-                # # Calculate significant directions (above mean magnitude)
-                # dir_magnitude_local = np.sqrt(U**2 + V**2)
-                # significant_dirs = dir_magnitude_local > np.mean(dir_magnitude_local)
-                
-                # plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
-                # # Plot significant directions in white
-                # for i in range(len(X)):
-                #     for j in range(len(Y)):
-                #         if significant_dirs[i, j]:
-                #             plt.quiver(X[i, j], Y[i, j], U[i, j], V[i, j],
-                #                      color='white',
-                #                      scale=15,
-                #                      width=0.005,
-                #                      headwidth=7,
-                #                      headlength=10,
-                #                      headaxislength=7)
-                
-                # plt.title("Original Directions\nWhite = Significant Changes", color='white', pad=20)
-                # plt.axis('off')
-                
-                # Momentum vector field
-                # plt.subplot(222)
-                # U_mom = momentum_dir_np[0, ::4, ::4]
-                # V_mom = momentum_dir_np[1, ::4, ::4]
-                
-                # # Calculate significant momentum directions
-                # mom_magnitude_local = np.sqrt(U_mom**2 + V_mom**2)
-                # significant_mom = mom_magnitude_local > np.mean(mom_magnitude_local)
-                
-                # plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
-                # # Plot significant momentum directions in white
-                # for i in range(len(X)):
-                #     for j in range(len(Y)):
-                #         if significant_mom[i, j]:
-                #             plt.quiver(X[i, j], Y[i, j], U_mom[i, j], V_mom[i, j],
-                #                      color='white',
-                #                      scale=15,
-                #                      width=0.005,
-                #                      headwidth=7,
-                #                      headlength=10,
-                #                      headaxislength=7)
-                
-                # plt.title("Momentum-Corrected\nWhite = Significant Changes", color='white', pad=20)
-                # plt.axis('off')
-                
-                # # Difference magnitude (binary threshold)
-                # plt.subplot(223)
-                # diff_magnitude = np.sqrt(np.sum((momentum_dir_np - dir_xt_np)**2, axis=0))
-                # significant_diff = diff_magnitude > np.mean(diff_magnitude)
-                # plt.imshow(significant_diff, cmap='binary')
-                # plt.title("Significant Differences\nWhite = Large Changes", color='white', pad=20)
-                # plt.axis('off')
-                
-                # # Combined difference visualization
-                # plt.subplot(224)
-                # U_diff = U_mom - U
-                # V_diff = V_mom - V
-                # diff_magnitude_local = np.sqrt(U_diff**2 + V_diff**2)
-                # significant_diffs = diff_magnitude_local > np.mean(diff_magnitude_local)
-                
-                # plt.imshow(latent_vis, cmap='gray')  # Use grayscale colormap
-                # # Plot significant differences in white
-                # for i in range(len(X)):
-                #     for j in range(len(Y)):
-                #         if significant_diffs[i, j]:
-                #             plt.quiver(X[i, j], Y[i, j], U_diff[i, j], V_diff[i, j],
-                #                      color='white',
-                #                      scale=10,
-                #                      width=0.005,
-                #                      headwidth=7,
-                #                      headlength=10,
-                #                      headaxislength=7)
-                
-                # plt.title("Direction Differences\nWhite = Significant Changes", 
-                #          color='white', pad=20)
-                # plt.axis('off')
-                
-                # # Save the analysis plot
-                # save_path = os.path.join(vis_dir, f"direction_analysis_step_{timestep}_frame_{i}.png")
-                # plt.tight_layout()
-                # plt.savefig(save_path,
-                #           bbox_inches='tight', dpi=150,
-                #           facecolor='black', edgecolor='none')
-                # plt.close()
-                
-                # Add momentum-corrected direction to pred_x0
-                pred_x0 = pred_x0 + momentum_corrected
-                
-            prev_frame = pred_x0.detach()
-            
-            
-            # Apply conditioning using either DAVIS masks or attention/segmentation
-            if davis_masks is not None and davis_masks.shape[2] > i:
-                # Use DAVIS mask directly
-                mask = davis_masks[:, :, i, :, :]  # [H, W]
-                mask = mask.unsqueeze(0)  # [1, 1, H, W]
-                mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)  # [1, C, 1, 32, 32]
-                
-                # Apply the cond_image to the masked pred_x0 region
-                if cond_image is None:
-                    cond_image = torch.zeros_like(pred_x0[:, :, 0])
-                elif cond_image.shape[1] != pred_x0.shape[1]:
-                    if cond_image.shape[1] == 3:
-                        alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
-                        cond_image = torch.cat([cond_image, alpha_channel], dim=1)
+            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+
+           
+
+            # Apply conditioning AFTER x_prev — injection only affects prev_frame
+            # so it propagates through momentum into future frames
+            if timestep <= 300:
+                if davis_masks is not None and davis_masks.shape[2] > i:
+                    mask = davis_masks[:, :, i, :, :]
+                    mask = mask.unsqueeze(0)
+                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)
+
+                    cond_img_local = cond_image
+                    if cond_img_local is None:
+                        cond_img_local = torch.zeros_like(pred_x0)
                     else:
-                        raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
-                
-                # Apply enhancement factor based on timestep
-                enhancement_factor = 1.5 if timestep <= 300 else 1.0
-                
-                # Apply the mask with the properly sized conditioning image
-                if mask.sum() != 0:
-                    pred_x0 = torch.where(
-                        mask.to(pred_x0.device) > 0.5,
-                        cond_image * enhancement_factor,
-                        pred_x0
-                    )
-            else:
-                if timestep <= 300:
-                    # Use attention/segmentation approach
+                        if cond_img_local.shape[1] != pred_x0.shape[1] and cond_img_local.shape[1] == 3:
+                            alpha_channel = torch.ones_like(cond_img_local[:, :1])
+                            cond_img_local = torch.cat([cond_img_local, alpha_channel], dim=1)
+                        if cond_img_local.dim() == 4 and pred_x0.dim() == 5:
+                            cond_img_local = cond_img_local.unsqueeze(2)
+
+                    if mask.sum() != 0:
+                        injection_strength = gamma
+                        mask_float = (mask.to(pred_x0.device) > 0.5).float()
+                        blended = (1 - injection_strength) * pred_x0 + injection_strength * cond_img_local
+                        pred_x0 = mask_float * blended + (1 - mask_float) * pred_x0
+                else:
                     pred_x0, attention = self.apply_cond_img(
-                        pred_x0, 
-                        cond_image, 
-                        target, 
-                        i, 
+                        pred_x0,
+                        cond_image,
+                        target,
+                        i,
                         pre_masks if not use_self_attention else getattr(self, 'previous_attention', None),
                         experiment_condition,
                         use_self_attention=use_self_attention,
                     )
-                    
+
                     if use_self_attention:
                         self.previous_attention = attention
                     else:
                         pre_masks = attention
-                
-            # Blend with noise
-            pred_x0 = (1-gamma) * pred_x0 + gamma * noise
-            
-            # # Visualize the pred_x0
-            # save_dir = "visualizations/pred_x0"
-            # os.makedirs(save_dir, exist_ok=True)
-            
-            # # Process tensor for visualization
-            # vis_tensor = pred_x0.cpu().numpy()
-            # if len(vis_tensor.shape) == 5:  # [B,C,T,H,W]
-            #     vis_tensor = vis_tensor[0, :, 0]  # Now [C,H,W]
-            # elif len(vis_tensor.shape) == 4:  # [B,C,H,W]
-            #     vis_tensor = vis_tensor[0]  # Now [C,H,W]
-                
-            # # Handle different channel configurations
-            # if vis_tensor.shape[0] == 1:
-            #     vis_tensor = np.repeat(vis_tensor, 3, axis=0)
-            # elif vis_tensor.shape[0] == 4:
-            #     vis_tensor = vis_tensor[:3]
-            # elif vis_tensor.shape[0] != 3:
-            #     vis_tensor = vis_tensor[:3] if vis_tensor.shape[0] > 3 else np.pad(
-            #         vis_tensor,
-            #         ((0, 3 - vis_tensor.shape[0]), (0, 0), (0, 0)),
-            #         mode='constant'
-            #     )
-            
-            # # Transpose from [C,H,W] to [H,W,C]
-            # vis_tensor = np.transpose(vis_tensor, (1, 2, 0))
-            
-            # # Scale values to [0, 255] range
-            # vis_tensor = ((vis_tensor + 1) * 127.5).clip(0, 255).astype(np.uint8)
-            
-            # # Save the processed image
-            # Image.fromarray(vis_tensor).save(f"{save_dir}/pred_x0_step_{timestep}_frame_{i}.png")
+
+            # Save injected pred_x0 as prev_frame → carries injection into momentum
+            if pred_x0.dim() == 4:
+                pred_x0 = pred_x0.unsqueeze(2)
+            elif pred_x0.dim() == 5 and pred_x0.shape[2] != 1:
+                pred_x0 = pred_x0[:, :, [0]]
+            prev_frame = pred_x0.detach()
+
+            x_prevs.append(x_prev)
+            pred_x0s.append(pred_x0)
+
+        x_prev = torch.cat(x_prevs, dim=2)
+        pred_x0 = torch.cat(pred_x0s, dim=2)
+
+        return x_prev, pred_x0
+
+    @torch.no_grad()
+    def ddim_step_composable(self, sample, noise_pred_orig, noise_pred_cond, indices, ts,
+                              davis_masks=None, experiment_condition="baseline",
+                              target=None, mixing_strength=0.3):
+        """
+        Composable diffusion: compute x_prev from both original and conditioned noise predictions,
+        then blend in the masked region. This produces clean semantic mixing.
+
+        Args:
+            noise_pred_orig: noise prediction from original prompt only
+            noise_pred_cond: noise prediction from original + conditioned prompt
+            mixing_strength: 0.0 = pure original, 1.0 = pure conditioned (0.3 = sweet spot)
+        """
+        b, _, f, *_, device = *sample.shape, sample.device
+
+        alphas = self.ddim_alphas
+        alphas_prev = self.ddim_alphas_prev
+        sqrt_one_minus_alphas = self.ddim_sqrt_one_minus_alphas
+        sigmas = self.ddim_sigmas
+
+        size = (b, 1, 1, 1, 1)
+
+        x_prevs = []
+        pred_x0s = []
+
+        for i, index in enumerate(indices):
+            x = sample[:, :, [i]]
+            e_t_orig = noise_pred_orig[:, :, [i]]
+            e_t_cond = noise_pred_cond[:, :, [i]]
+            timestep = ts[i]
+            a_t = torch.full(size, alphas[index], device=device)
+            a_prev = torch.full(size, alphas_prev[index], device=device)
+            sigma_t = torch.full(size, sigmas[index], device=device)
+            sqrt_one_minus_at = torch.full(size, sqrt_one_minus_alphas[index], device=device)
+
+            # Compute x_prev from ORIGINAL prompt (clean scene)
+            pred_x0_orig = (x - sqrt_one_minus_at * e_t_orig) / a_t.sqrt()
+            dir_xt_orig = (1. - a_prev - sigma_t**2).sqrt() * e_t_orig
+            noise = sigma_t * noise_like(x.shape, device)
+            x_prev_orig = a_prev.sqrt() * pred_x0_orig + dir_xt_orig + noise
+
+            # Compute x_prev from CONDITIONED prompt (concept-mixed scene)
+            pred_x0_cond = (x - sqrt_one_minus_at * e_t_cond) / a_t.sqrt()
+            dir_xt_cond = (1. - a_prev - sigma_t**2).sqrt() * e_t_cond
+            x_prev_cond = a_prev.sqrt() * pred_x0_cond + dir_xt_cond + noise  # Same noise for consistency
+
+            # Get mask for this frame
+            mask_frame = None
+            if davis_masks is not None and davis_masks.shape[2] > i:
+                mask_frame = davis_masks[:, :, i, :, :].unsqueeze(0)  # [1, 1, 1, H, W]
+            elif experiment_condition == "concept_attention" and self._concept_attn_extractor is not None:
+                token_indices = self._find_target_token_indices(target)
+                h, w = x.shape[3], x.shape[4]
+                concept_mask = self._get_concept_mask(token_indices, h, w)
+                if concept_mask is not None:
+                    mask_frame = concept_mask.to(device).unsqueeze(2)
+
+            # Blend x_prev: original outside mask, mix of original+conditioned inside mask
+            if mask_frame is not None:
+                mask_values = mask_frame.to(device).float().clamp(0.0, 1.0)
+                if self._concept_mask_strategy != "soft":
+                    mask_values = (mask_values > 0.5).float()
+                mask_float = mask_values.expand_as(x_prev_orig)
+                x_prev = (1 - mask_float) * x_prev_orig + mask_float * (
+                    (1 - mixing_strength) * x_prev_orig + mixing_strength * x_prev_cond
+                )
+                pred_x0 = (1 - mask_float) * pred_x0_orig + mask_float * (
+                    (1 - mixing_strength) * pred_x0_orig + mixing_strength * pred_x0_cond
+                )
+            else:
+                # No mask available — use global blend (weaker)
+                x_prev = (1 - mixing_strength) * x_prev_orig + mixing_strength * x_prev_cond
+                pred_x0 = (1 - mixing_strength) * pred_x0_orig + mixing_strength * pred_x0_cond
 
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
@@ -731,31 +745,150 @@ class DDIMSampler(object):
             sys.path.append(str(grounded_sam_path))
             
         return grounded_sam_path
-    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline", use_self_attention=False):
+    def initialize_concept_attention(self):
+        """Initialize the ConceptAttention-based mask extractor (lightweight alternative to SAM2+GDINO)."""
+        from lvdm.modules.attention import CrossAttentionMapExtractor
+        if self._concept_attn_extractor is None:
+            self._concept_attn_extractor = CrossAttentionMapExtractor()
+            # No hooks needed — recording is injected directly into CrossAttention.efficient_forward
+            self._concept_attn_extractor.register(self.model.model.diffusion_model)
+
+    def set_prompt_for_concept_attention(self, prompt):
+        """Store the full prompt text so we can find target token positions within it."""
+        self._full_prompt = prompt
+
+    def set_concept_mask_strategy(self, strategy="relative_threshold", threshold=0.3,
+                                  topk_ratio=0.2, std_scale=1.0, max_components=1):
+        """Configure how concept attention maps are converted into masks."""
+        self._concept_mask_strategy = strategy
+        self._concept_mask_threshold = threshold
+        self._concept_mask_topk_ratio = topk_ratio
+        self._concept_mask_std_scale = std_scale
+        self._concept_mask_max_components = max_components
+
+    def _get_concept_mask(self, token_indices, h, w):
+        return self._concept_attn_extractor.get_concept_mask(
+            token_indices, h, w,
+            threshold=self._concept_mask_threshold,
+            strategy=self._concept_mask_strategy,
+            topk_ratio=self._concept_mask_topk_ratio,
+            std_scale=self._concept_mask_std_scale,
+            max_components=self._concept_mask_max_components,
+        )
+
+    def _find_target_token_indices(self, target, prompt_embeds=None):
+        """Find token indices for the target concept word within the full prompt's token sequence."""
+        if self._concept_attn_target == target and self._concept_token_indices is not None:
+            return self._concept_token_indices
+
+        import open_clip
+        target_clean = target.rstrip(".")
+        bos_id, eos_id = 49406, 49407
+
+        # Tokenize the target word alone to get its token IDs
+        target_tokens = open_clip.tokenize([target_clean])[0]
+        target_ids = []
+        for tid in target_tokens.tolist():
+            if tid == bos_id or tid == eos_id:
+                continue
+            if tid == 0:  # padding
+                break
+            target_ids.append(tid)
+
+        # Tokenize the full prompt to find where target_ids appear
+        full_prompt = getattr(self, '_full_prompt', target_clean)
+        prompt_tokens = open_clip.tokenize([full_prompt])[0]
+        prompt_ids = prompt_tokens.tolist()
+
+        # Search for target_ids subsequence within prompt_ids
+        indices = []
+        for start in range(len(prompt_ids) - len(target_ids) + 1):
+            if prompt_ids[start:start + len(target_ids)] == target_ids:
+                indices = list(range(start, start + len(target_ids)))
+                break
+
+        # Fallback: if exact match not found, search for individual token matches
+        if not indices:
+            for i, pid in enumerate(prompt_ids):
+                if pid in target_ids and pid != bos_id and pid != eos_id:
+                    indices.append(i)
+            if not indices:
+                # Last resort: assume position 1 onwards
+                indices = list(range(1, 1 + len(target_ids)))
+
+        self._concept_token_indices = indices
+        self._concept_attn_target = target
+        return indices
+
+    def _apply_concept_attention(self, pred_x0, cond_image, target, step, pre_masks, blend_alpha=1.0):
         """
-        Apply conditioning image using either segmentation or self-attention
+        Apply conditioning using cross-attention maps from the UNet (ConceptAttention).
+        Much faster than SAM2+GDINO — uses attention maps already computed during denoising.
+        """
+        token_indices = self._find_target_token_indices(target)
+
+        # pred_x0 may be [1, C, H, W] or [1, C, 1, H, W]
+        if pred_x0.dim() == 5:
+            h, w = pred_x0.shape[3], pred_x0.shape[4]
+        else:
+            h, w = pred_x0.shape[2], pred_x0.shape[3]
+
+        mask = self._get_concept_mask(token_indices, h, w)
+
+        if mask is None:
+            return pred_x0, pre_masks
+
+        # Visualize concept attention mask (save first 10 steps to avoid I/O overload)
+        if step < 10:
+            vis_dir = "visualizations/concept_attention_masks"
+            os.makedirs(vis_dir, exist_ok=True)
+            mask_vis = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+            Image.fromarray(mask_vis, mode='L').save(f"{vis_dir}/mask_frame_{step}.png")
+
+        mask_2d = mask.squeeze(0).squeeze(0).to(pred_x0.device)  # (H, W)
+        masks = mask_2d.unsqueeze(0)  # (1, H, W)
+        return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), pre_masks
+
+    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline", use_self_attention=False, blend_alpha=1.0):
+        """
+        Apply conditioning image using either segmentation, concept attention, or self-attention.
         Args:
             pred_x0: predicted image
             cond_image: conditioning image
             target: text prompt for segmentation
             step: current step
             pre_masks: previous masks for temporal consistency
+            experiment_condition: "segmentation", "concept_attention", "bounding_box", or "baseline"
             use_self_attention: whether to use self-attention instead of segmentation
+            blend_alpha: blending strength (0=no conditioning, 1=full conditioning)
         """
-        return self._apply_segmentation(pred_x0, cond_image, target, step, pre_masks, experiment_condition)
+        if experiment_condition == "concept_attention":
+            return self._apply_concept_attention(pred_x0, cond_image, target, step, pre_masks, blend_alpha=blend_alpha)
+        return self._apply_segmentation(pred_x0, cond_image, target, step, pre_masks, experiment_condition, blend_alpha=blend_alpha)
 
 
-    def _apply_segmentation(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline"):
-        """Original segmentation-based approach"""
+    def _apply_segmentation(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline", blend_alpha=1.0):
+        """Original segmentation-based approach with caching optimizations"""
+        self.profiler.start("segmentation")
         original_masks = pre_masks
         if not target.endswith("."):
             target = target + "."
+
+        # --- If we have a cached mask and previous masks, check IOU to skip segmentation ---
+        if self._cached_mask is not None and pre_masks is not None:
+            iou = self.calculate_iou(self._cached_mask, pre_masks)
+            if isinstance(iou, (float, int)) and iou > self._mask_iou_skip_threshold:
+                # Mask is stable — reuse cached mask, skip expensive segmentation
+                masks = self._cached_mask if isinstance(self._cached_mask, torch.Tensor) else torch.from_numpy(self._cached_mask).float()
+                self.profiler.stop("segmentation")
+                return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
+
         # Convert tensor to PIL Image if needed
         if isinstance(pred_x0, torch.Tensor):
             image_np = pred_x0.cpu().numpy()
         if len(image_np.shape) == 5:
             image_np = image_np.squeeze(2).squeeze(0)
-        
+
         frame = np.transpose(image_np, (1, 2, 0))
 
         if frame.shape[-1] != 3:
@@ -769,49 +902,59 @@ class DDIMSampler(object):
             frame = (frame * 255).astype(np.uint8)
         else:
             frame = frame.astype(np.uint8)
-        
+
         frame_pil = Image.fromarray(frame)
-        
-        # Rest of original segmentation code...
+
+        # SAM2 image encoding (must run per-frame as image changes)
         self.sam2_predictor.set_image(np.array(frame_pil.convert("RGB")))
-        
-        inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
-        inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else 
-                    v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else 
-                    v.to("cuda"))
-                for k, v in inputs.items() 
-                if isinstance(v, torch.Tensor)}
-        
+
+        # Cache text tokenization — only reprocess if target changed
+        if self._cached_text_target != target:
+            self._cached_text_inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
+            self._cached_text_inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else
+                        v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else
+                        v.to("cuda"))
+                    for k, v in self._cached_text_inputs.items()
+                    if isinstance(v, torch.Tensor)}
+            self._cached_text_target = target
+        else:
+            # Re-run processor for new image but reuse text tokens where possible
+            inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
+            self._cached_text_inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else
+                        v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else
+                        v.to("cuda"))
+                    for k, v in inputs.items()
+                    if isinstance(v, torch.Tensor)}
+
         with torch.cuda.amp.autocast():
             with torch.no_grad():
-                outputs = self.grounding_model(**inputs)
-        
+                outputs = self.grounding_model(**self._cached_text_inputs)
+
         results = self.processor.post_process_grounded_object_detection(
             outputs,
-            inputs['input_ids'],
+            self._cached_text_inputs['input_ids'],
             box_threshold=0.4,
             text_threshold=0.3,
             target_sizes=[frame_pil.size[::-1]]
         )
-        
+
         input_boxes = results[0]["boxes"].cpu().numpy()
         if input_boxes.shape[0] == 0:
-            ## Use the previous masks
+            ## Use the previous masks or cached mask
+            if self._cached_mask is not None:
+                masks = self._cached_mask if isinstance(self._cached_mask, torch.Tensor) else torch.from_numpy(self._cached_mask).float()
+                self.profiler.stop("segmentation")
+                return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
             if pre_masks is None:
+                self.profiler.stop("segmentation")
                 return pred_x0, None
-            else:
-                if experiment_condition == "baseline":
-                    masks = pre_masks
-                elif experiment_condition == "eroded":
-                    masks = create_eroded_mask(pre_masks)
-                elif experiment_condition == "dilated":
-                    masks = create_dilated_mask(pre_masks)
-                elif experiment_condition == "noisy":
-                    masks = create_noisy_mask(pre_masks)
-                original_masks = pre_masks
         else:
             if experiment_condition == "bounding_box":
                 masks = input_boxes
+                if isinstance(input_boxes, torch.Tensor):
+                    input_boxes_np = input_boxes.cpu().numpy()
+                else:
+                    input_boxes_np = np.asarray(input_boxes)
             else:
                 # Get masks from SAM2
                 masks, _, _ = self.sam2_predictor.predict(
@@ -821,40 +964,27 @@ class DDIMSampler(object):
                     multimask_output=False,
                 )
 
-            ## Add that if the new generated mask is too deviated from the previous mask, use the previous mask using IOU 
+            # Use IOU to decide whether to keep new mask or revert to previous
             if pre_masks is not None:
                 iou = self.calculate_iou(masks, pre_masks)
-                if iou < 0.5:
-                    if experiment_condition == "baseline":
-                        masks = pre_masks
-                    elif experiment_condition == "eroded":
-                        masks = create_eroded_mask(pre_masks)
-                    elif experiment_condition == "dilated":
-                        masks = create_dilated_mask(pre_masks)
-                    elif experiment_condition == "noisy":
-                        masks = create_noisy_mask(pre_masks)
-                    original_masks = pre_masks
-                else:
-                    original_masks = masks
-                    if experiment_condition == "eroded":
-                        masks = create_eroded_mask(masks)
-                    elif experiment_condition == "dilated":
-                        masks = create_dilated_mask(masks)
-                    elif experiment_condition == "noisy":
-                        masks = create_noisy_mask(masks)
 
             # Convert masks to tensor if they're numpy arrays
             if isinstance(masks, np.ndarray):
-                masks = torch.from_numpy(masks).float()  # Ensure float first
-            
-        # Create a copy of pred_x0 to modify
+                masks = torch.from_numpy(masks).float()
+
+            # Cache the computed mask for future skip checks
+            self._cached_mask = masks
+
+        self.profiler.stop("segmentation")
+        return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
+
+    def _apply_mask_to_pred(self, pred_x0, masks, cond_image, step, blend_alpha=1.0):
+        """Apply mask-based conditioning to pred_x0 via soft blending."""
         modified_pred_x0 = pred_x0.clone()
 
-        # For each mask in the batch
         for mask in masks:
-            # if the mask majorly covers the image, use the original image
+            # if the mask majorly covers the image, skip
             if mask.sum() > 0.8 * mask.numel():
-                modified_pred_x0 = pred_x0
                 continue
             # Expand mask to match channels
             try:
@@ -862,81 +992,30 @@ class DDIMSampler(object):
                 if len(mask.shape) == 4:
                     mask = mask.expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
                 else:
-                    print(mask.shape)
                     mask = mask.squeeze(0).expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
             except Exception as e:
                 breakpoint()
 
-            ## Apply the cond_image to the masked pred_x0 region
             if cond_image is None:
-                # Create a black conditional image matching pred_x0's dimensions
-                cond_image = torch.zeros_like(pred_x0[:, :, 0])  # Take first frame's dimensions
+                cond_image = torch.zeros_like(pred_x0[:, :, 0])
             elif cond_image.shape[1] != pred_x0.shape[1]:
                 if cond_image.shape[1] == 3:
-                    # Add Alpha Channel
                     alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
                     cond_image = torch.cat([cond_image, alpha_channel], dim=1)
                 else:
-                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")            
-          
-            # Apply enhancement factor
-            enhancement_factor = 1.5
-            # Apply the mask with the properly sized conditioning image
-            # save_dir = "visualizations/masks"
-            # os.makedirs(save_dir, exist_ok=True)
-            
-            # # Process mask for visualization
-            # mask_vis = mask.cpu().numpy()
-            # if len(mask_vis.shape) == 4:  # [1,1,H,W]
-            #     mask_vis = mask_vis[0, 0]  # Now [H,W]
-            #     # Scale to [0, 255]
-            #     mask_vis = (mask_vis * 255).clip(0, 255).astype(np.uint8)
-            
-            # # Save mask visualization
-            # Image.fromarray(mask_vis).save(f"{save_dir}/mask_step_{step}.png")
-            
-            # Process conditional image for visualization only if it exists
-            # if cond_image is not None:
-            #     cond_vis = cond_image.cpu().numpy()
-                
-            #     # Handle different dimensional cases
-            #     if len(cond_vis.shape) == 5:  # [B,C,T,H,W]
-            #         cond_vis = cond_vis[0, :, 0]  # Take first batch and time step -> [C,H,W]
-            #     elif len(cond_vis.shape) == 4:  # [B,C,H,W]
-            #         cond_vis = cond_vis[0]  # Take first batch -> [C,H,W]
-            #     elif len(cond_vis.shape) == 3:  # Already [C,H,W]
-            #         pass
-            #     else:
-            #         print(f"Warning: Unexpected cond_image shape: {cond_vis.shape}")
-            #         cond_vis = None
-                
-            #     if cond_vis is not None:
-            #         # Handle channels
-            #         if cond_vis.shape[0] == 1:
-            #             cond_vis = np.repeat(cond_vis, 3, axis=0)
-            #         elif cond_vis.shape[0] == 4:
-            #             cond_vis = cond_vis[:3]
-            #         elif cond_vis.shape[0] != 3:
-            #             cond_vis = cond_vis[:3] if cond_vis.shape[0] > 3 else np.pad(
-            #                 cond_vis,
-            #                 ((0, 3 - cond_vis.shape[0]), (0, 0), (0, 0)),
-            #                 mode='constant'
-            #             )
-                    
-            #         # Transpose and scale
-            #         cond_vis = np.transpose(cond_vis, (1, 2, 0))
-            #         cond_vis = ((cond_vis + 1) * 127.5).clip(0, 255).astype(np.uint8)
-                    
-            #         # Save conditional image visualization
-            #         Image.fromarray(cond_vis).save(f"{save_dir}/cond_image_step_{step}.png")
-            
-            modified_pred_x0 = torch.where(
-                mask.to(pred_x0.device) > 0.5,
-                cond_image * enhancement_factor if cond_image is not None else torch.zeros_like(pred_x0),
-                modified_pred_x0
-            )
-            
-        return modified_pred_x0, original_masks
+                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
+
+            # Blend cond_image into pred_x0 within the masked region. Hard mask
+            # strategies are binary; the soft strategy keeps attention weights.
+            mask_float = mask.to(pred_x0.device).float().clamp(0.0, 1.0)
+            if self._concept_mask_strategy != "soft":
+                mask_float = (mask_float > 0.5).float()
+            blended = (1 - blend_alpha) * modified_pred_x0 + blend_alpha * cond_image
+            modified_pred_x0 = mask_float * blended + (1 - mask_float) * modified_pred_x0
+            # Save mask for x_prev regional nudge
+            self._last_mask = mask_float[:, :1]  # [1, 1, H, W]
+
+        return modified_pred_x0
     
     def calculate_iou(self, masks1, masks2):
         """Calculate Intersection over Union (IoU) between two sets of masks.
