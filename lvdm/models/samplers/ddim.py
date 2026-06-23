@@ -512,10 +512,7 @@ class DDIMSampler(object):
 
             # Direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-             # x_prev uses momentum-corrected pred_x0 (clean denoising trajectory)
-            
             noise = sigma_t * noise_like(x.shape, device)
-            
 
             # Calculate motion gradient if we have a previous frame
             if prev_frame is not None:
@@ -530,13 +527,9 @@ class DDIMSampler(object):
                 )
                 correction_strength = 0.1 * (1.0 - timestep / 1000.0)
                 pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
-                
-            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
-           
-
-            # Apply conditioning AFTER x_prev — injection only affects prev_frame
-            # so it propagates through momentum into future frames
+            # Apply conditioning before x_prev so injection affects the current
+            # denoising step and then propagates through momentum.
             if timestep <= 300:
                 if davis_masks is not None and davis_masks.shape[2] > i:
                     mask = davis_masks[:, :, i, :, :]
@@ -574,12 +567,15 @@ class DDIMSampler(object):
                     else:
                         pre_masks = attention
 
-            # Save injected pred_x0 as prev_frame → carries injection into momentum
+            # Save injected pred_x0 as prev_frame: it carries injection into
+            # future momentum and is cloned to avoid storage aliasing surprises.
             if pred_x0.dim() == 4:
                 pred_x0 = pred_x0.unsqueeze(2)
             elif pred_x0.dim() == 5 and pred_x0.shape[2] != 1:
                 pred_x0 = pred_x0[:, :, [0]]
-            prev_frame = pred_x0.detach()
+
+            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+            prev_frame = pred_x0.detach().clone()
 
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
