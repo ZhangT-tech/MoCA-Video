@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Groun
 
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from rebuttals.masks_quality_test import create_eroded_mask, create_dilated_mask, create_noisy_mask
+# from rebuttals.masks_quality_test import create_eroded_mask, create_dilated_mask, create_noisy_mask
 from PIL import Image, ImageDraw, ImageFont
 import math
 import torch.nn as nn

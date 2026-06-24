@@ -170,7 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--eta", "-e", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default=None, help="custom output directory")
     parser.add_argument("--use_mp4", action="store_true", default=True, help="use mp4 format for the output video")
-    parser.add_argument("--output_fps", type=int, default=10, help="fps of the output video")
+    parser.add_argument("--output_fps", type=int, default=5, help="fps of the output video")
     parser.add_argument("--prompt_index", type=int, default=1, help="index of the prompt to run")
     parser.add_argument("--experiment_condition", type=str, default="baseline", help="Experiment condition")
     
