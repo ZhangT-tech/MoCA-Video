@@ -345,7 +345,7 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
         x = self.preprocess(x)
 
         # to patches - whether to use dual patchnorm - https://arxiv.org/abs/2302.01327v1
-        if self.model.visual.input_patchnorm:
+        if hasattr(self.model.visual, 'input_patchnorm') and self.model.visual.input_patchnorm:
             # einops - rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)')
             x = x.reshape(x.shape[0], x.shape[1], self.model.visual.grid_size[0], self.model.visual.patch_size[0], self.model.visual.grid_size[1], self.model.visual.patch_size[1])
             x = x.permute(0, 2, 4, 1, 3, 5)

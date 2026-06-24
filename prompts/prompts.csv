@@ -1,5 +1,5 @@
 prompt,conditioned_object,conditioned_image_path,conditioned_prompt,gamma
-"An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/conditioned/robot.jpg","the condition is a robot", 2
+"An astronaut is floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/conditioned/robot.jpg","the condition is a robot", 2
 "An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/conditioned/cat.png","the condition is a cat", 1.5
 "An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,"assets/conditioned/penguin.jpg","the condition is a penguin",2
 "A superhero in a dynamic pose against a city skyline, cape flowing in the wind",superhero,"assets/conditioned/eagle.jpg","the condition is an eagle",2

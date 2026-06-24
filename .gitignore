@@ -53,3 +53,6 @@ multi*
 convert_frames*
 check_missing*
 VBench
+
+delete/
+dit_implementation

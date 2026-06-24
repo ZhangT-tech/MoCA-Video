@@ -316,12 +316,13 @@ class DDIMSampler(object):
         b, _, f, _, _ = shape
         ts = torch.Tensor(timesteps.copy()).to(device=device, dtype=torch.long)
 
-        # Enable attention map capture for concept_attention mode
+        # Only capture attention maps when this partition has frames at t<=300
         use_concept_attn = (experiment_condition == "concept_attention" and
                             self._concept_attn_extractor is not None)
+        needs_capture = use_concept_attn and any(t <= 300 for t in timesteps)
 
         self.profiler.start("unet_forward")
-        if use_concept_attn:
+        if needs_capture:
             with self._concept_attn_extractor.capture():
                 noise_pred = self.unet(latents, cond, ts,
                                         unconditional_guidance_scale=unconditional_guidance_scale,
@@ -434,9 +435,12 @@ class DDIMSampler(object):
     @torch.no_grad()
     def unet(self, x, c, t, unconditional_guidance_scale=1.,
              unconditional_conditioning=None, **kwargs):
+        # Use autocast for FP16 if enabled
+        amp_ctx = torch.amp.autocast('cuda', enabled=getattr(self, '_use_fp16', False))
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            e_t = self.model.apply_model(x, t, c, **kwargs) # unet denoiser
+            with amp_ctx:
+                e_t = self.model.apply_model(x, t, c, **kwargs)
         else:
             # Batch conditioned and unconditioned into a single forward pass
             x_combined = torch.cat([x, x], dim=0)
@@ -451,8 +455,18 @@ class DDIMSampler(object):
                         # since both cond and uncond use the same fps value
                         c_combined[key] = c[key]
                     elif isinstance(c[key], list):
-                        c_combined[key] = [torch.cat([c_val, uc_val], dim=0)
-                                           for c_val, uc_val in zip(c[key], unconditional_conditioning[key])]
+                        uc_values = unconditional_conditioning.get(key, [])
+                        combined_values = []
+                        for idx, c_val in enumerate(c[key]):
+                            if idx < len(uc_values):
+                                uc_val = uc_values[idx]
+                            elif len(uc_values) == 1 and uc_values[0].shape == c_val.shape:
+                                uc_val = uc_values[0]
+                            else:
+                                uc_val = torch.zeros_like(c_val)
+                            uc_val = uc_val.to(device=c_val.device, dtype=c_val.dtype)
+                            combined_values.append(torch.cat([c_val, uc_val], dim=0))
+                        c_combined[key] = combined_values
                     elif isinstance(c[key], torch.Tensor):
                         c_combined[key] = torch.cat([c[key], unconditional_conditioning[key]], dim=0)
                     else:
@@ -461,7 +475,8 @@ class DDIMSampler(object):
                 c_combined = [torch.cat([c_val, uc_val], dim=0)
                               for c_val, uc_val in zip(c, unconditional_conditioning)]
 
-            e_t_combined = self.model.apply_model(x_combined, t_combined, c_combined, **kwargs)
+            with amp_ctx:
+                e_t_combined = self.model.apply_model(x_combined, t_combined, c_combined, **kwargs)
             e_t, e_t_uncond = e_t_combined.chunk(2, dim=0)
 
             # text cfg
@@ -512,7 +527,6 @@ class DDIMSampler(object):
 
             # Direction pointing to x_t
             dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-            noise = sigma_t * noise_like(x.shape, device)
 
             # Calculate motion gradient if we have a previous frame
             if prev_frame is not None:
@@ -528,54 +542,55 @@ class DDIMSampler(object):
                 correction_strength = 0.1 * (1.0 - timestep / 1000.0)
                 pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
 
-            # Apply conditioning before x_prev so injection affects the current
-            # denoising step and then propagates through momentum.
-            if timestep <= 300:
-                if davis_masks is not None and davis_masks.shape[2] > i:
-                    mask = davis_masks[:, :, i, :, :]
-                    mask = mask.unsqueeze(0)
-                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1, -1)
+            # Store current frame for next iteration
+            prev_frame = pred_x0.detach()
 
+            noise = sigma_t * noise_like(x.shape, device)
+            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+
+            # Apply conditioning to pred_x0 (after x_prev, matching original working version)
+            if timestep <= 300:
+                # Get mask: DAVIS, concept attention, or SAM2
+                mask_frame = None
+                if davis_masks is not None and davis_masks.shape[2] > i:
+                    mask_frame = davis_masks[:, :, i, :, :].unsqueeze(0)
+                    mask_frame = mask_frame.expand(-1, pred_x0.shape[1], -1, -1, -1)
+                elif experiment_condition == "concept_attention" and self._concept_attn_extractor is not None:
+                    token_indices = self._find_target_token_indices(target)
+                    h, w = pred_x0.shape[3] if pred_x0.dim() == 5 else pred_x0.shape[2], \
+                           pred_x0.shape[4] if pred_x0.dim() == 5 else pred_x0.shape[3]
+                    concept_mask = self._get_concept_mask(token_indices, h, w)
+                    if concept_mask is not None:
+                        mask_frame = concept_mask.to(device)
+                        if mask_frame.dim() == 4:
+                            mask_frame = mask_frame.unsqueeze(2)
+                        mask_frame = mask_frame.expand(-1, pred_x0.shape[1], -1, -1, -1)
+
+                if mask_frame is not None:
+                    # Prepare cond image (raw RGBA pixels, matching original)
                     cond_img_local = cond_image
-                    if cond_img_local is None:
-                        cond_img_local = torch.zeros_like(pred_x0)
-                    else:
+                    if cond_img_local is not None:
                         if cond_img_local.shape[1] != pred_x0.shape[1] and cond_img_local.shape[1] == 3:
                             alpha_channel = torch.ones_like(cond_img_local[:, :1])
                             cond_img_local = torch.cat([cond_img_local, alpha_channel], dim=1)
                         if cond_img_local.dim() == 4 and pred_x0.dim() == 5:
                             cond_img_local = cond_img_local.unsqueeze(2)
-
-                    if mask.sum() != 0:
-                        injection_strength = gamma
-                        mask_float = (mask.to(pred_x0.device) > 0.5).float()
-                        blended = (1 - injection_strength) * pred_x0 + injection_strength * cond_img_local
-                        pred_x0 = mask_float * blended + (1 - mask_float) * pred_x0
-                else:
-                    pred_x0, attention = self.apply_cond_img(
-                        pred_x0,
-                        cond_image,
-                        target,
-                        i,
-                        pre_masks if not use_self_attention else getattr(self, 'previous_attention', None),
-                        experiment_condition,
-                        use_self_attention=use_self_attention,
-                    )
-
-                    if use_self_attention:
-                        self.previous_attention = attention
                     else:
-                        pre_masks = attention
+                        cond_img_local = torch.zeros_like(pred_x0)
 
-            # Save injected pred_x0 as prev_frame: it carries injection into
-            # future momentum and is cloned to avoid storage aliasing surprises.
+                    # Replace pred_x0 in masked region with conditioned image
+                    enhancement_factor = 1.2
+                    mask_float = (mask_frame.to(device) > 0.5).float()
+                    pred_x0 = (1 - mask_float) * pred_x0 + mask_float * (cond_img_local * enhancement_factor)
+
+                # Add noise to conditioned pred_x0 (matching original: pred_x0 + gamma * noise)
+                pred_x0 = pred_x0 + gamma * noise
+
+            # Shape guard
             if pred_x0.dim() == 4:
                 pred_x0 = pred_x0.unsqueeze(2)
             elif pred_x0.dim() == 5 and pred_x0.shape[2] != 1:
                 pred_x0 = pred_x0[:, :, [0]]
-
-            x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-            prev_frame = pred_x0.detach().clone()
 
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)

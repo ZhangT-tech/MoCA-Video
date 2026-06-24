@@ -15,6 +15,7 @@ from utils.freeinit_utils import freq_mix_3d, get_freq_filter
 import torchvision.transforms as transforms
 from einops import rearrange, repeat
 import csv
+import re
 from PIL import Image
 import torch.nn.functional as F
 
@@ -81,13 +82,11 @@ def prepare_latents(args, input_path, sampler, model=None, data=None):
     
     return latents
 
-
-
 def shift_latents(latents, davis_data=None, model=None):
     
     if davis_data is None:
         anchor_frame = latents[:, :, 0].clone().unsqueeze(2) # b,c,1,h,w
-        
+
         latents[:, :, :-1] = latents[:, :, 1:].clone()
 
         new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
@@ -108,7 +107,6 @@ def shift_latents(latents, davis_data=None, model=None):
         latents[:, :, :-1] = latents[:, :, 1:].clone()
 
         new_noise = torch.randn_like(latents[:, :, -1]).unsqueeze(2)
-        
         freq_filter = get_freq_filter(anchor_frame.shape, latents.device, "gaussian", 1, 0.25, 0.25)
 
         latents[:, :, -1] = freq_mix_3d(anchor_frame, new_noise, freq_filter).squeeze(2)
@@ -241,7 +239,7 @@ def base_ddim_sampling(model, cond, noise_shape, ddim_steps=50, ddim_eta=1.0,
     return batch_images, ddim_sampler, samples
 
 def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
-                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image=None, targets=None, gamma=0.5, davis_data=None, anchor_frame=None, experiment_condition="baseline", **kwargs):
+                        cfg_scale=1.0, output_dir=None, latents_dir=None, save_frames=False, conditioned_image=None, targets=None, gamma=0.5, davis_data=None, anchor_frame=None, experiment_condition="baseline", cond_original=None, mixing_strength=0.3, **kwargs):
     batch_size = noise_shape[0]
     kwargs.update({"clean_cond": True})
     ## Obtain the target
@@ -299,6 +297,7 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
         frames = frames.to("cuda")
         if masks is not None:
             masks = masks.to("cuda")
+        davis_data = (frames, masks)  # Update tuple with CUDA tensors
     else:
         masks = None
 
@@ -310,8 +309,9 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
             
             t = timesteps[start_idx:end_idx] 
             idx = indices[start_idx:end_idx]            
-            print(f"start_idx: {start_idx}, midpoint_idx: {midpoint_idx}, end_idx: {end_idx}")
-            print(f"t: {t}, idx: {idx}")
+            if getattr(args, 'verbose', False):
+                print(f"start_idx: {start_idx}, midpoint_idx: {midpoint_idx}, end_idx: {end_idx}")
+                print(f"t: {t}, idx: {idx}")
             input_latents = latents[:,:,start_idx:end_idx].clone() 
             input_masks = masks[:,:,start_idx:end_idx].clone() if masks is not None else None
 
@@ -328,8 +328,11 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                     cond_image=conditioned_image,
                     target=target,
                     gamma=gamma,
-                    davis_masks=input_masks,  # Pass DAVIS masks
+                    davis_masks=input_masks,
                     experiment_condition=experiment_condition,
+                    cond_original=cond_original,
+                    mixing_strength=mixing_strength,
+                    davis_mixing_mode=getattr(args, "davis_mixing_mode", "injection"),
                     **kwargs
                 )
             else:
@@ -343,7 +346,10 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
                     unconditional_conditioning=uc,
                     cond_image=conditioned_image,
                     target=target,
-                    gamma=gamma,    
+                    gamma=gamma,
+                    experiment_condition=experiment_condition,
+                    cond_original=cond_original,
+                    mixing_strength=mixing_strength,
                     **kwargs
                 )
 
@@ -368,6 +374,10 @@ def fifo_ddim_sampling(args, model, conditioning, noise_shape, ddim_sampler,\
             latents, davis_data = shift_latents(latents, davis_data, model) 
         else:
             latents = shift_latents(latents) 
+
+    # Print profiling summary if profiler was enabled
+    if hasattr(ddim_sampler, 'profiler') and ddim_sampler.profiler.enabled:
+        print(ddim_sampler.profiler.summary())
 
     return fifo_video_frames
 
@@ -503,6 +513,45 @@ def load_model_checkpoint(model, ckpt):
 
 
 def load_prompts(prompt_file, prompt_index=None):
+    # Check if file is .txt format
+    if prompt_file.endswith('.txt'):
+        # Handle .txt format: video_name object_id "referring_expression"
+        prompt_list = []
+        with open(prompt_file, 'r') as f:
+            lines = f.readlines()
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line:  # Skip empty lines
+                    continue
+                
+                # Parse line: video_name object_id "referring_expression"
+                # Extract the quoted text (third column)
+                match = re.search(r'"([^"]*)"', line)
+                if match:
+                    prompt = match.group(1)
+                    # Extract video_name (first column) and object_id (second column)
+                    parts = line.split()
+                    video_name = parts[0] if len(parts) > 0 else ""
+                    object_id = parts[1] if len(parts) > 1 else ""
+                    
+                    prompt_data = {
+                        "prompt": prompt,
+                        "conditioned_object": video_name,
+                        "conditioned_image_path": "",  # Not available in .txt format
+                        "conditioned_prompt": prompt + ".",
+                        "gamma": 1.0  # Default gamma value
+                    }
+                    prompt_list.append(prompt_data)
+        
+        if prompt_index is not None:
+            if prompt_index >= len(prompt_list):
+                raise ValueError(f"Prompt index {prompt_index} exceeds number of available prompts")
+            return [prompt_list[prompt_index]]
+        
+        return prompt_list
+    
+    # Original CSV handling
     with open(prompt_file, 'r') as f:
         # Use csv reader to properly handle quoted strings containing commas
         reader = csv.DictReader(f)

@@ -62,6 +62,15 @@ def main(args):
     model = load_model_checkpoint(model, args.ckpt_path)
     model.eval()
 
+    # FP16 flag — handled via autocast in the sampling loop
+    if getattr(args, 'use_fp16', False):
+        print("FP16 inference enabled via autocast")
+
+    # Compile UNet for faster inference (PyTorch 2.0+)
+    if getattr(args, 'use_compile', False):
+        print("Compiling UNet with torch.compile...")
+        model.model.diffusion_model = torch.compile(model.model.diffusion_model, mode="reduce-overhead")
+
     ## sample shape
     assert (args.height % 16 == 0) and (args.width % 16 == 0), "Error: image size [h,w] should be multiples of 16!"
     ## latent noise shape
@@ -84,13 +93,13 @@ def main(args):
         conditioned_prompt = data["conditioned_prompt"]
         gamma = args.gamma_override if args.gamma_override is not None else data["gamma"]
         output_dir, latents_dir = set_directory(args, prompt, conditioned_image_path)
-        if os.path.exists(output_dir):
-            # Check if the output directory has a file called "fifo.mp4"
-            if os.path.exists(output_dir+"/fifo.mp4"):
-                print(f"The output directory {output_dir} already exists and has a file called fifo.mp4")
-                continue
-            else:
-                print(f"The output directory {output_dir} already exists but does not have a file called fifo.mp4")
+        # if os.path.exists(output_dir):
+        #     # Check if the output directory has a file called "fifo.mp4"
+        #     if os.path.exists(output_dir+"/fifo.mp4"):
+        #         print(f"The output directory {output_dir} already exists and has a file called fifo.mp4")
+        #         continue
+        #     else:
+        #         print(f"The output directory {output_dir} already exists but does not have a file called fifo.mp4")
 
         # Copy conditioning image into output directory for easy comparison
         if conditioned_image_path and os.path.exists(conditioned_image_path):
@@ -113,15 +122,15 @@ def main(args):
             transforms.CenterCrop((args.height//8, args.width//8)),
             transforms.ToTensor(),
         ])
-        # Encode conditioning image to VAE latent space (same space as pred_x0)
-        cond_image_pil = Image.open(conditioned_image_path).convert("RGB")
-        cond_image_rgb = transforms.Compose([
-            transforms.Resize((args.height, args.width)),
-            transforms.CenterCrop((args.height, args.width)),
+        # Conditioning image as raw pixels in latent resolution (matching original working version)
+        transform = transforms.Compose([
+            transforms.Resize((args.height//8, args.width//8)),
+            transforms.CenterCrop((args.height//8, args.width//8)),
             transforms.ToTensor(),
-        ])(cond_image_pil).unsqueeze(0).to("cuda")  # [1, 3, H, W] in [0,1]
-        cond_image_rgb = cond_image_rgb * 2.0 - 1.0  # scale to [-1, 1] for VAE
-        cond_image = model.encode_first_stage_2DAE(cond_image_rgb.unsqueeze(2))  # [1, 4, 1, h, w] latent
+        ])
+        cond_image = Image.open(conditioned_image_path).convert("RGBA")
+        cond_image = transform(cond_image).unsqueeze(1).unsqueeze(0)  # [1, 4, 1, 40, 64]
+        cond_image = cond_image.to("cuda")
 
         ## inference
         is_run_base = not (os.path.exists(latents_dir+f"/{args.num_inference_steps}.pt") and os.path.exists(latents_dir+f"/0.pt"))
@@ -136,6 +145,8 @@ def main(args):
         # Enable profiling if requested
         if getattr(args, 'profile', False):
             ddim_sampler.profiler.enabled = True
+        if getattr(args, 'use_fp16', False):
+            ddim_sampler._use_fp16 = True
         # Pass full prompt for concept attention token matching
         if args.experiment_condition == "concept_attention":
             ddim_sampler.set_prompt_for_concept_attention(prompt)
@@ -189,7 +200,7 @@ if __name__ == "__main__":
     parser.add_argument("--video_length", type=int, default=16, help="f in paper")
     parser.add_argument("--num_partitions", "-n", type=int, default=4, help="n in paper")
     parser.add_argument("--num_inference_steps", type=int, default=16, help="number of inference steps, it will be f * n forcedly")
-    parser.add_argument("--prompt_file", "-p", type=str, default="datasets/DAVIS/davis_text_annotations/Davis16_annot2.txt", help="path to the prompt file")
+    parser.add_argument("--prompt_file", "-p", type=str, default="/ibex/user/zhant0g/code/MoCA-Video/prompts/prompts.csv", help="path to the prompt file")
     parser.add_argument("--new_video_length", "-l", type=int, default=100, help="N in paper; desired length of the output video")
     parser.add_argument("--num_processes", type=int, default=1, help="number of processes if you want to run only the subset of the prompts")
     parser.add_argument("--rank", type=int, default=0, help="rank of the process(0~num_processes-1)")
@@ -208,6 +219,8 @@ if __name__ == "__main__":
     parser.add_argument("--profile", action="store_true", default=False, help="Enable profiling of denoising steps")
     parser.add_argument("--mixing_strength", type=float, default=0.3, help="Composable diffusion mixing strength (0=original, 1=full conditioned)")
     parser.add_argument("--gamma_override", type=float, default=None, help="Override gamma from prompt file")
+    parser.add_argument("--use_compile", action="store_true", default=False, help="Use torch.compile on UNet")
+    parser.add_argument("--use_fp16", action="store_true", default=False, help="Use FP16 inference")
     parser.add_argument("--concept_mask_strategy", type=str, default="relative_threshold",
                         choices=["relative_threshold", "topk", "mean_std", "largest_component", "absolute", "soft"],
                         help="How to convert concept attention into a mask")
