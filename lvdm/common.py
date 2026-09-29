@@ -1,6 +1,7 @@
 import math
 from inspect import isfunction
 import torch
+import torch.utils.checkpoint
 from torch import nn
 import torch.distributed as dist
 
@@ -92,4 +93,3 @@ def checkpoint(func, inputs, params, flag):
         return ckpt(func, *inputs)
     else:
         return func(*inputs)
-

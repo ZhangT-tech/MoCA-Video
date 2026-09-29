@@ -9,7 +9,6 @@ import os
 import torchvision
 import sys
 from pathlib import Path
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 import torch.nn.functional as F
 import logging
 
@@ -49,15 +48,6 @@ logging.getLogger().setLevel(logging.ERROR)  # Only show ERROR messages
 logging.disable(logging.INFO)
 logging.disable(logging.DEBUG)
 logging.disable(logging.WARNING)
-import sys
-import os
-
-# Add the Grounded-SAM-2 directory to the Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Grounded-SAM-2'))
-
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
-from rebuttals.masks_quality_test import create_eroded_mask, create_dilated_mask, create_noisy_mask
 from PIL import Image, ImageDraw, ImageFont
 import math
 import torch.nn as nn
@@ -78,39 +68,21 @@ class DDIMSampler(object):
         self.use_self_attention = use_self_attention
         self.vis_helper = VisualizationHelper()
 
-        # Initialize models only if needed
-        self.sam2_model = None
-        self.sam2_predictor = None
-        self.processor = None
-        self.grounding_model = None
-
-        # Flag to control model initialization
-        self.models_initialized = False
-
         # Profiling timer (set enabled=True to measure bottlenecks)
         self.profiler = ProfilingTimer(enabled=False)
 
-        # Segmentation caching: reuse masks when IOU is high
-        self._cached_text_inputs = None
-        self._cached_text_target = None
-        self._cached_mask = None
-        self._mask_iou_skip_threshold = 0.85  # Skip segmentation if mask IOU > threshold
-
-        # ConceptAttention-based masking (lightweight alternative to SAM2+GDINO)
+        # Localize the source concept with the denoiser's cross-attention.
         self._concept_attn_extractor = None
         self._concept_token_indices = None
         self._concept_attn_target = None
         self._concept_mask_strategy = "relative_threshold"
-        self._concept_mask_threshold = 0.3
+        self._concept_mask_threshold = 0.4
         self._concept_mask_topk_ratio = 0.2
         self._concept_mask_std_scale = 1.0
         self._concept_mask_max_components = 1
 
-        # Initialize based on experiment condition
         if experiment_condition == "concept_attention":
             self.initialize_concept_attention()
-        elif not use_self_attention:
-            self.initialize_segmentation_models()
             
 
     def register_buffer(self, name, attr):
@@ -499,19 +471,12 @@ class DDIMSampler(object):
         x_prevs = []
         pred_x0s = []
 
-        pre_masks = None
         prev_frame = None
 
         # Initialize momentum if not already done
         if not hasattr(self, 'momentum'):
             self.momentum = torch.zeros_like(sample)
             self.beta = 0.9  # Momentum decay rate
-
-        # Create visualization directory if it doesn't exist
-        vis_dir = "visualizations/denoising"
-        os.makedirs(vis_dir, exist_ok=True)
-        cond_dir = "visualizations/conditioning"
-        os.makedirs(cond_dir, exist_ok=True)
 
         for i, index in enumerate(indices):
             x = sample[:, :, [i]]
@@ -539,20 +504,23 @@ class DDIMSampler(object):
                     self.beta * self.momentum[:, :, [i-1]] +
                     (1 - self.beta) * mg
                 )
+                max_momentum = getattr(self, '_momentum_clamp', 2.0)
+                if max_momentum >= 0:
+                    self.momentum[:, :, [i]] = self.momentum[:, :, [i]].clamp(
+                        -max_momentum, max_momentum
+                    )
                 correction_strength = 0.1 * (1.0 - timestep / 1000.0)
                 pred_x0 = pred_x0 + correction_strength * self.momentum[:, :, [i]]
-
-            # Store current frame for next iteration
-            prev_frame = pred_x0.detach()
 
             noise = sigma_t * noise_like(x.shape, device)
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
-            # Apply conditioning to pred_x0 (after x_prev, matching original working version)
-            if timestep <= 300:
-                # Get mask: DAVIS, concept attention, or SAM2
+            # Injection reaches the next frame through momentum; x_prev is unchanged.
+            if timestep <= 300 and not getattr(self, '_disable_injection', False):
                 mask_frame = None
-                if davis_masks is not None and davis_masks.shape[2] > i:
+                if getattr(self, '_disable_mask', False):
+                    mask_frame = torch.ones_like(pred_x0)
+                elif davis_masks is not None and davis_masks.shape[2] > i:
                     mask_frame = davis_masks[:, :, i, :, :].unsqueeze(0)
                     mask_frame = mask_frame.expand(-1, pred_x0.shape[1], -1, -1, -1)
                 elif experiment_condition == "concept_attention" and self._concept_attn_extractor is not None:
@@ -567,19 +535,17 @@ class DDIMSampler(object):
                         mask_frame = mask_frame.expand(-1, pred_x0.shape[1], -1, -1, -1)
 
                 if mask_frame is not None:
-                    # Prepare cond image (raw RGBA pixels, matching original)
+                    # The reference is VAE-encoded into the same space as pred_x0.
                     cond_img_local = cond_image
-                    if cond_img_local is not None:
-                        if cond_img_local.shape[1] != pred_x0.shape[1] and cond_img_local.shape[1] == 3:
-                            alpha_channel = torch.ones_like(cond_img_local[:, :1])
-                            cond_img_local = torch.cat([cond_img_local, alpha_channel], dim=1)
-                        if cond_img_local.dim() == 4 and pred_x0.dim() == 5:
-                            cond_img_local = cond_img_local.unsqueeze(2)
-                    else:
-                        cond_img_local = torch.zeros_like(pred_x0)
+                    if cond_img_local is None:
+                        raise ValueError("A reference image latent is required for injection")
+                    if cond_img_local.dim() == 4 and pred_x0.dim() == 5:
+                        cond_img_local = cond_img_local.unsqueeze(2)
+                    if cond_img_local.shape != pred_x0.shape:
+                        cond_img_local = cond_img_local.expand_as(pred_x0)
 
                     # Replace pred_x0 in masked region with conditioned image
-                    enhancement_factor = 1.2
+                    enhancement_factor = getattr(self, '_enhancement_factor', 0.8)
                     mask_float = (mask_frame.to(device) > 0.5).float()
                     pred_x0 = (1 - mask_float) * pred_x0 + mask_float * (cond_img_local * enhancement_factor)
 
@@ -592,6 +558,7 @@ class DDIMSampler(object):
             elif pred_x0.dim() == 5 and pred_x0.shape[2] != 1:
                 pred_x0 = pred_x0[:, :, [0]]
 
+            prev_frame = pred_x0.detach()
             x_prevs.append(x_prev)
             pred_x0s.append(pred_x0)
 
@@ -741,23 +708,11 @@ class DDIMSampler(object):
         self.vis_helper.visualize_mask_and_latent(mask, latent, timestep, frame_idx, save_dir)
 
     def visualize_masks(self, masks, save_dir, step):
-        """Visualize the segmentation masks"""
+        """Visualize supplied masks."""
         self.vis_helper.visualize_masks(masks, save_dir, step)
 
-    def setup_grounded_sam_paths(self):
-        """Setup paths for Grounded SAM2 modules"""
-        grounded_sam_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Grounded-SAM-2')
-
-        if not os.path.exists(grounded_sam_path):
-            raise RuntimeError(f"Grounded-SAM-2 directory not found at {grounded_sam_path}")
-
-        # Add to Python path
-        if str(grounded_sam_path) not in sys.path:
-            sys.path.append(str(grounded_sam_path))
-            
-        return grounded_sam_path
     def initialize_concept_attention(self):
-        """Initialize the ConceptAttention-based mask extractor (lightweight alternative to SAM2+GDINO)."""
+        """Initialize the concept-attention mask extractor."""
         from lvdm.modules.attention import CrossAttentionMapExtractor
         if self._concept_attn_extractor is None:
             self._concept_attn_extractor = CrossAttentionMapExtractor()
@@ -768,7 +723,7 @@ class DDIMSampler(object):
         """Store the full prompt text so we can find target token positions within it."""
         self._full_prompt = prompt
 
-    def set_concept_mask_strategy(self, strategy="relative_threshold", threshold=0.3,
+    def set_concept_mask_strategy(self, strategy="relative_threshold", threshold=0.4,
                                   topk_ratio=0.2, std_scale=1.0, max_components=1):
         """Configure how concept attention maps are converted into masks."""
         self._concept_mask_strategy = strategy
@@ -831,268 +786,12 @@ class DDIMSampler(object):
         self._concept_attn_target = target
         return indices
 
-    def _apply_concept_attention(self, pred_x0, cond_image, target, step, pre_masks, blend_alpha=1.0):
-        """
-        Apply conditioning using cross-attention maps from the UNet (ConceptAttention).
-        Much faster than SAM2+GDINO — uses attention maps already computed during denoising.
-        """
-        token_indices = self._find_target_token_indices(target)
-
-        # pred_x0 may be [1, C, H, W] or [1, C, 1, H, W]
-        if pred_x0.dim() == 5:
-            h, w = pred_x0.shape[3], pred_x0.shape[4]
-        else:
-            h, w = pred_x0.shape[2], pred_x0.shape[3]
-
-        mask = self._get_concept_mask(token_indices, h, w)
-
-        if mask is None:
-            return pred_x0, pre_masks
-
-        # Visualize concept attention mask (save first 10 steps to avoid I/O overload)
-        if step < 10:
-            vis_dir = "visualizations/concept_attention_masks"
-            os.makedirs(vis_dir, exist_ok=True)
-            mask_vis = (mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
-            Image.fromarray(mask_vis, mode='L').save(f"{vis_dir}/mask_frame_{step}.png")
-
-        mask_2d = mask.squeeze(0).squeeze(0).to(pred_x0.device)  # (H, W)
-        masks = mask_2d.unsqueeze(0)  # (1, H, W)
-        return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), pre_masks
-
-    def apply_cond_img(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline", use_self_attention=False, blend_alpha=1.0):
-        """
-        Apply conditioning image using either segmentation, concept attention, or self-attention.
-        Args:
-            pred_x0: predicted image
-            cond_image: conditioning image
-            target: text prompt for segmentation
-            step: current step
-            pre_masks: previous masks for temporal consistency
-            experiment_condition: "segmentation", "concept_attention", "bounding_box", or "baseline"
-            use_self_attention: whether to use self-attention instead of segmentation
-            blend_alpha: blending strength (0=no conditioning, 1=full conditioning)
-        """
-        if experiment_condition == "concept_attention":
-            return self._apply_concept_attention(pred_x0, cond_image, target, step, pre_masks, blend_alpha=blend_alpha)
-        return self._apply_segmentation(pred_x0, cond_image, target, step, pre_masks, experiment_condition, blend_alpha=blend_alpha)
 
 
-    def _apply_segmentation(self, pred_x0, cond_image, target, step, pre_masks, experiment_condition="baseline", blend_alpha=1.0):
-        """Original segmentation-based approach with caching optimizations"""
-        self.profiler.start("segmentation")
-        original_masks = pre_masks
-        if not target.endswith("."):
-            target = target + "."
 
-        # --- If we have a cached mask and previous masks, check IOU to skip segmentation ---
-        if self._cached_mask is not None and pre_masks is not None:
-            iou = self.calculate_iou(self._cached_mask, pre_masks)
-            if isinstance(iou, (float, int)) and iou > self._mask_iou_skip_threshold:
-                # Mask is stable — reuse cached mask, skip expensive segmentation
-                masks = self._cached_mask if isinstance(self._cached_mask, torch.Tensor) else torch.from_numpy(self._cached_mask).float()
-                self.profiler.stop("segmentation")
-                return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
 
-        # Convert tensor to PIL Image if needed
-        if isinstance(pred_x0, torch.Tensor):
-            image_np = pred_x0.cpu().numpy()
-        if len(image_np.shape) == 5:
-            image_np = image_np.squeeze(2).squeeze(0)
-
-        frame = np.transpose(image_np, (1, 2, 0))
-
-        if frame.shape[-1] != 3:
-            if frame.shape[-1] == 1:
-                frame = np.repeat(frame, 3, axis=-1)
-            else:
-                frame = frame[:, :, :3]
-
-        # Scale to [0, 255] if in [0, 1]
-        if np.floor(frame.max()) <= 1.0:
-            frame = (frame * 255).astype(np.uint8)
-        else:
-            frame = frame.astype(np.uint8)
-
-        frame_pil = Image.fromarray(frame)
-
-        # SAM2 image encoding (must run per-frame as image changes)
-        self.sam2_predictor.set_image(np.array(frame_pil.convert("RGB")))
-
-        # Cache text tokenization — only reprocess if target changed
-        if self._cached_text_target != target:
-            self._cached_text_inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
-            self._cached_text_inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else
-                        v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else
-                        v.to("cuda"))
-                    for k, v in self._cached_text_inputs.items()
-                    if isinstance(v, torch.Tensor)}
-            self._cached_text_target = target
-        else:
-            # Re-run processor for new image but reuse text tokens where possible
-            inputs = self.processor(images=frame_pil, text=target, return_tensors="pt")
-            self._cached_text_inputs = {k: (v.to("cuda", dtype=torch.float16) if v.dtype in [torch.float32, torch.float64] else
-                        v.to("cuda", dtype=torch.long) if v.dtype in [torch.int32, torch.int64] else
-                        v.to("cuda"))
-                    for k, v in inputs.items()
-                    if isinstance(v, torch.Tensor)}
-
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                outputs = self.grounding_model(**self._cached_text_inputs)
-
-        results = self.processor.post_process_grounded_object_detection(
-            outputs,
-            self._cached_text_inputs['input_ids'],
-            box_threshold=0.4,
-            text_threshold=0.3,
-            target_sizes=[frame_pil.size[::-1]]
-        )
-
-        input_boxes = results[0]["boxes"].cpu().numpy()
-        if input_boxes.shape[0] == 0:
-            ## Use the previous masks or cached mask
-            if self._cached_mask is not None:
-                masks = self._cached_mask if isinstance(self._cached_mask, torch.Tensor) else torch.from_numpy(self._cached_mask).float()
-                self.profiler.stop("segmentation")
-                return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
-            if pre_masks is None:
-                self.profiler.stop("segmentation")
-                return pred_x0, None
-        else:
-            if experiment_condition == "bounding_box":
-                masks = input_boxes
-                if isinstance(input_boxes, torch.Tensor):
-                    input_boxes_np = input_boxes.cpu().numpy()
-                else:
-                    input_boxes_np = np.asarray(input_boxes)
-            else:
-                # Get masks from SAM2
-                masks, _, _ = self.sam2_predictor.predict(
-                    point_coords=None,
-                    point_labels=None,
-                    box=input_boxes,
-                    multimask_output=False,
-                )
-
-            # Use IOU to decide whether to keep new mask or revert to previous
-            if pre_masks is not None:
-                iou = self.calculate_iou(masks, pre_masks)
-
-            # Convert masks to tensor if they're numpy arrays
-            if isinstance(masks, np.ndarray):
-                masks = torch.from_numpy(masks).float()
-
-            # Cache the computed mask for future skip checks
-            self._cached_mask = masks
-
-        self.profiler.stop("segmentation")
-        return self._apply_mask_to_pred(pred_x0, masks, cond_image, step, blend_alpha=blend_alpha), original_masks
-
-    def _apply_mask_to_pred(self, pred_x0, masks, cond_image, step, blend_alpha=1.0):
-        """Apply mask-based conditioning to pred_x0 via soft blending."""
-        modified_pred_x0 = pred_x0.clone()
-
-        for mask in masks:
-            # if the mask majorly covers the image, skip
-            if mask.sum() > 0.8 * mask.numel():
-                continue
-            # Expand mask to match channels
-            try:
-                mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-                if len(mask.shape) == 4:
-                    mask = mask.expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
-                else:
-                    mask = mask.squeeze(0).expand(-1, pred_x0.shape[1], -1, -1)  # [1,C,H,W]
-            except Exception as e:
-                breakpoint()
-
-            if cond_image is None:
-                cond_image = torch.zeros_like(pred_x0[:, :, 0])
-            elif cond_image.shape[1] != pred_x0.shape[1]:
-                if cond_image.shape[1] == 3:
-                    alpha_channel = torch.ones_like(cond_image[:, :1, :, :])
-                    cond_image = torch.cat([cond_image, alpha_channel], dim=1)
-                else:
-                    raise ValueError(f"Conditional image must have 3 or 4 channels, got {cond_image.shape[1]}")
-
-            # Blend cond_image into pred_x0 within the masked region. Hard mask
-            # strategies are binary; the soft strategy keeps attention weights.
-            mask_float = mask.to(pred_x0.device).float().clamp(0.0, 1.0)
-            if self._concept_mask_strategy != "soft":
-                mask_float = (mask_float > 0.5).float()
-            blended = (1 - blend_alpha) * modified_pred_x0 + blend_alpha * cond_image
-            modified_pred_x0 = mask_float * blended + (1 - mask_float) * modified_pred_x0
-            # Save mask for x_prev regional nudge
-            self._last_mask = mask_float[:, :1]  # [1, 1, H, W]
-
-        return modified_pred_x0
     
-    def calculate_iou(self, masks1, masks2):
-        """Calculate Intersection over Union (IoU) between two sets of masks.
-        
-        Args:
-            masks1 (numpy.ndarray or torch.Tensor): First set of masks [N,H,W]
-            masks2 (numpy.ndarray or torch.Tensor): Second set of masks [N,H,W]
             
-        Returns:
-            float: Average IoU score across all mask pairs
-        """
-        # Convert to torch tensors if needed
-        if isinstance(masks1, np.ndarray):
-            masks1 = torch.from_numpy(masks1)
-        if isinstance(masks2, np.ndarray):
-            masks2 = torch.from_numpy(masks2)
-        
-        # Ensure masks are binary
-        masks1 = masks1 > 0.5
-        masks2 = masks2 > 0.5
-        
-        # Calculate IoU for each pair of masks
-        ious = []
-        for mask1, mask2 in zip(masks1, masks2):
-            mask1 = mask1.to(masks2.device)
-            intersection = torch.logical_and(mask1, mask2).sum().float()
-            union = torch.logical_or(mask1, mask2).sum().float()
-            
-            # Handle edge case where union is 0
-            if union == 0:
-                if intersection == 0:  # Both masks are empty
-                    iou = 1.0
-                else:  # This shouldn't happen mathematically
-                    iou = 0.0
-            else:
-                iou = intersection / union
-            ious.append(iou)
-        
-        # Return average IoU
-        return torch.tensor(ious).mean().item()
-            
-    def initialize_segmentation_models(self):
-        """Initialize SAM2 and Grounding DINO for segmentation-based approach"""
-        if self.models_initialized:
-            return
-            
-        # Initialize SAM2 and Grounding DINO
-        grounded_sam_path = self.setup_grounded_sam_paths()
-        sam2_checkpoint = os.path.join(grounded_sam_path, 'checkpoints', 'sam2.1_hiera_large.pt')
-        
-        if not os.path.exists(sam2_checkpoint):
-            raise RuntimeError(f"SAM2 checkpoint not found at {sam2_checkpoint}")
-        
-        # Initialize SAM2
-        self.sam2_model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', sam2_checkpoint, device="cuda")
-        self.sam2_predictor = SAM2ImagePredictor(self.sam2_model)
-        
-        # Initialize Grounding DINO
-        grounding_model_id = "IDEA-Research/grounding-dino-tiny"
-        self.processor = AutoProcessor.from_pretrained(grounding_model_id)
-        self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            grounding_model_id,
-            torch_dtype=torch.float16
-        ).to("cuda").half()
-        
-        self.models_initialized = True
             
     @torch.no_grad()
     def ddim_inversion(self, frames, num_inference_steps, eta=1.0, latents_dir=None):
@@ -1156,4 +855,3 @@ class DDIMSampler(object):
         latents = torch.cat(latents_list, dim=2)
         
         return latents
-            

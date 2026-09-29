@@ -1,0 +1,2 @@
+prompt,conditioned_object,conditioned_image_path,conditioned_prompt,gamma
+"An astronaut floating in space against a starry background, wearing a detailed white spacesuit with NASA insignia, Earth visible in the distance",astronaut,assets/results/cat.png,the condition is a cat,1.5

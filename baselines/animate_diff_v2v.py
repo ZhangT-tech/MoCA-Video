@@ -52,7 +52,7 @@ def load_video(file_path: str):
     return images
 
 # --- Begin dynamic video/prompt selection ---
-ROOT_DIR = "results/videocraft/sam2/random_noise"
+ROOT_DIR = "results/videocraft_v2_fifo/random_noise/concept_attention"
 
 # Get all prompt folders
 prompt_folders = [d for d in os.listdir(ROOT_DIR) if os.path.isdir(os.path.join(ROOT_DIR, d))]
