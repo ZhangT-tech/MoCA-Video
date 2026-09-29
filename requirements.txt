@@ -241,8 +241,6 @@ s3transfer==0.6.2
 safehttpx==0.1.6
 safetensors==0.5.2
 sahi==0.11.23
-# Editable install with no version control (SAM-2==1.0)
--e /ibex/user/zhant0g/code/VidStoryCraft/Grounded-SAM-2
 scenedetect==0.6.5.2
 scikit-image==0.25.0
 scikit-learn==1.6.0

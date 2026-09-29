@@ -40,15 +40,14 @@ deletes/
 Cogvideo*
 AnyV2V
 cog*
-Grounded-SAM-2/
 FreeBlend/
 datasets
 *.sh
 I2VEdit/
 RAVE/
 TokenFlow/
-rebuttals*
 *.txt
+!requirements-inference.txt
 multi*
 convert_frames*
 check_missing*
