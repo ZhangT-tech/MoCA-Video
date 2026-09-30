@@ -10,135 +10,39 @@
 
 ---
 
-## 📽️ Teaser  
-<!-- insert teaser GIF or static images here -->
-[![Teaser Preview](assets/illustration/teaser.png)](assets/illustration/teaser.pdf)
----
+## 📽️ Paper teaser
 
-## 🎥 Video Results
+[![MoCA-Video teaser showing the current paper examples](assets/illustration/teaser.png)](assets/illustration/teaser.pdf)
 
-### Qualitative Results
+## 🎥 Results
 
-<div align="center">
-<table>
-<tr>
-<td colspan="3"><b>Mouse mixed with Cat</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_mouse.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/cat.png" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/mouse_cat.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
+### Qualitative comparison
 
-<tr>
-<td colspan="3"><b>Cow mixed with Sheep</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_cow.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/sheep.png" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/cow_sheep.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
+The current paper compares selected frames from an astronaut–cat blend with pretrained and training-free video editing baselines. MoCA-Video introduces feline features while retaining visible spacesuit and scene elements.
 
-<tr>
-<td colspan="3"><b>Bird mixed with Cat</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_bird.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/cat.png" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/bird_cat.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
+![Qualitative comparison from the current paper](assets/results/qualitative_comparison.png)
 
-<tr>
-<td colspan="3"><b>Horse mixed with Unicorn</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_horse.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/unicorn.jpg" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/horse_unicorn.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
+### Quantitative comparison on CTVB
 
-<tr>
-<td colspan="3"><b>Surfer mixed with Kayak</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_surfer.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/kayak.jpg" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/surfer_kayak.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
+The current paper evaluates 21 base videos and 106 video–image pairs. Arrows show the preferred direction for each metric. CASS and rel-CASS measure directional concept alignment; LPIPS-T measures temporal coherence; FVD and ImageReward measure video quality.
 
-<tr>
-<td colspan="3"><b>Astronaut mixed with Cat</b></td>
-</tr>
-<tr>
-<td>
-<img src="assets/results/origin_astronaut.gif" width="300"/>
-<p>Input Video</p>
-</td>
-<td>
-<img src="assets/results/cat.png" width="300"/>
-<p>Input Image</p>
-</td>
-<td>
-<img src="assets/results/astronaut_cat.gif" width="300"/>
-<p>Output Video</p>
-</td>
-</tr>
-</table>
-</div>
+| Method | CASS ↑ | rel-CASS ↑ | LPIPS-T ↓ | FVD ↓ | ImageReward ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AnimateDiffV2V | 0.68 | -0.41 | **0.009** | **1266** | 0.246 |
+| TokenFlow PnP | 2.87 | 0.02 | 0.010 | 4580 | -2.087 |
+| TokenFlow SDEdit | 1.98 | 0.05 | 0.150 | 4417 | -1.431 |
+| FreeBlend + DynamiCrafter | 1.47 | 0.01 | 0.016 | 6313 | -2.060 |
+| RAVE | 3.80 | 0.11 | 0.040 | 3546 | -0.721 |
+| AnyV2V | 2.31 | 0.08 | 0.020 | 3971 | -1.240 |
+| **MoCA-Video** | **7.15** | **0.14** | 0.111 | 3520 | **0.263** |
 
-### Quantitative Results
+MoCA-Video has the highest CASS and ImageReward in this comparison. AnimateDiffV2V has the lowest LPIPS-T and FVD, alongside the lowest CASS. These metrics capture different aspects of the editing task.
 
-Quantitative results reported in the paper:
+### User study
 
-<div align="center">
-<img src="assets/results/metric.png" width="800"/>
-<img src="assets/results/user_study.png" width="800"/>
-</div>
+The paper also reports ratings from 20 participants across eight trials each, using four 1–5 criteria:
+
+![User study results from the current paper](assets/results/user_study.png)
 
 ---
 
